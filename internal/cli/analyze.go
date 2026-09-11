@@ -32,7 +32,11 @@ import (
 )
 
 const (
-	// defaultProbeBundle is the published bundle carrying the probe catalogue.
+	// defaultProbeBundle is a placeholder, not a published bundle. No bundle of
+	// this name exists in the index, so the default only resolves once a probe
+	// corpus ships and the published name is confirmed. Until then --probes is
+	// the only working source, which is why the command is not registered in
+	// root.go.
 	defaultProbeBundle = "admission-probes"
 	// maxProbeNameLength is 253 (the API server's name limit) minus the 17
 	// characters collisionFreeName appends: "-kubeapt-" plus eight hex digits.
