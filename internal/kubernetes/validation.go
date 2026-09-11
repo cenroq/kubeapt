@@ -4,6 +4,7 @@
 package kubernetes
 
 import (
+	"context"
 	"fmt"
 
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
@@ -26,42 +27,42 @@ func EvaluateValidations(policy *admissionregistrationv1.ValidatingAdmissionPoli
 	resultData := ValidationResult{Compliant: true}
 	normalizeResourceForCEL(resource)
 
-	payload := map[string]interface{}{
-		"object":          resource,
-		"oldObject":       nil,
-		"request":         nil,
-		"params":          nil,
-		"namespaceObject": buildNamespaceObject(namespace, namespaceLabels),
-		"variables":       map[string]interface{}{},
-		"resource":        resource,
-	}
-	varScope := payload["variables"].(map[string]interface{})
-
-	for _, variable := range policy.Spec.Variables {
-		val, err := cel.Evaluate(variable.Expression, payload)
-		if err != nil {
-			return resultData, fmt.Errorf("variable %s evaluation failed for policy %s: %w", variable.Name, policy.Name, err)
-		}
-		varScope[variable.Name] = val
-	}
-
 	if len(policy.Spec.Validations) == 0 {
 		return resultData, nil
 	}
 
-	for idx, validation := range policy.Spec.Validations {
-		ok, err := cel.Check(validation.Expression, payload)
-		if err != nil {
-			return resultData, fmt.Errorf("cel evaluation failed for policy %s binding %s validation %d: %w", policy.Name, binding.Name, idx, err)
-		}
+	// authorizer is always declared even though kubeapt binds no Authorizer
+	// here. Declaring it costs nothing and lets a policy that mentions
+	// authorizer compile; leaving it out would fail the whole policy at compile
+	// time over an expression that may never be reached.
+	evaluator, err := cel.Compile(policy.Spec.Variables, policy.Spec.Validations, cel.Options{
+		HasParams:     policy.Spec.ParamKind != nil,
+		HasAuthorizer: true,
+	})
+	if err != nil {
+		return resultData, fmt.Errorf("cel compilation failed for policy %s: %w", policy.Name, err)
+	}
 
-		message := validation.Message
-		if message == "" {
-			message = validation.Expression
-		}
+	results, err := evaluator.Evaluate(context.TODO(), cel.Input{
+		Object:          resource,
+		Namespace:       namespace,
+		NamespaceLabels: namespaceLabels,
+	})
+	if err != nil {
+		return resultData, fmt.Errorf("cel evaluation failed for policy %s binding %s: %w", policy.Name, binding.Name, err)
+	}
 
-		if ok {
+	for idx, result := range results {
+		if result.Err != nil {
+			return resultData, fmt.Errorf("cel evaluation failed for policy %s binding %s validation %d: %w", policy.Name, binding.Name, idx, result.Err)
+		}
+		if result.Allowed {
 			continue
+		}
+
+		message := policy.Spec.Validations[idx].Message
+		if message == "" {
+			message = policy.Spec.Validations[idx].Expression
 		}
 
 		resultData.Compliant = false
@@ -69,40 +70,13 @@ func EvaluateValidations(policy *admissionregistrationv1.ValidatingAdmissionPoli
 		if len(actions) == 0 {
 			actions = []admissionregistrationv1.ValidationAction{admissionregistrationv1.Deny}
 		}
-		actionStrings := actionsToStrings(actions)
 		resultData.Violations = append(resultData.Violations, ValidationViolation{
 			Message: message,
-			Actions: actionStrings,
+			Actions: actionsToStrings(actions),
 		})
 	}
 
 	return resultData, nil
-}
-
-func buildNamespaceObject(name string, labels map[string]string) map[string]interface{} {
-	if name == "" {
-		return nil
-	}
-	meta := map[string]interface{}{
-		"name": name,
-	}
-	if len(labels) > 0 {
-		meta["labels"] = convertStringMap(labels)
-	}
-	return map[string]interface{}{
-		"metadata": meta,
-	}
-}
-
-func convertStringMap(values map[string]string) map[string]interface{} {
-	if len(values) == 0 {
-		return nil
-	}
-	out := make(map[string]interface{}, len(values))
-	for k, v := range values {
-		out[k] = v
-	}
-	return out
 }
 
 func actionsToStrings(actions []admissionregistrationv1.ValidationAction) []string {

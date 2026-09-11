@@ -27,15 +27,11 @@ import (
 	"github.com/spf13/cobra"
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
-	"k8s.io/client-go/discovery"
-	"k8s.io/client-go/dynamic"
-	"k8s.io/client-go/restmapper"
 	"sigs.k8s.io/yaml"
 
 	"github.com/cenroq/kubeapt/v2/internal/config"
@@ -1106,47 +1102,58 @@ func ensureBundleVersionAvailable(cmd *cobra.Command, bundleName, version string
 	return "", fmt.Errorf("bundle %s is not available; add it under %s or download it", bundleName, root)
 }
 
-// locateInstalledBundle resolves an installed bundle to its policies and
-// bindings paths. An empty bundleVersion selects the newest installed version.
-// Every failure explains which command would fix it.
-func locateInstalledBundle(bundleName, bundleVersion string) (policiesPath, bindingsPath string, err error) {
+// resolveInstalledBundleVersion picks the version of an installed bundle to
+// use. An empty bundleVersion selects the newest installed one. Nothing is
+// downloaded: a command that reads a bundle should not silently fetch it.
+func resolveInstalledBundleVersion(bundleName, bundleVersion string) (string, error) {
 	if err := validateBundleSegment("bundle name", bundleName); err != nil {
-		return "", "", err
+		return "", err
 	}
 
 	version := strings.TrimSpace(bundleVersion)
 	if version != "" {
 		if err := validateBundleSegment("bundle version", version); err != nil {
-			return "", "", err
+			return "", err
 		}
 	} else {
 		versions, err := config.BundleVersions(bundleName)
 		if err != nil {
-			return "", "", err
+			return "", err
 		}
 		if len(versions) == 0 {
 			dir, err := config.BundleDir(bundleName)
 			if err != nil {
-				return "", "", err
+				return "", err
 			}
-			return "", "", fmt.Errorf("bundle %s is not installed; place it under %s or run `kubeapt bundles import --from <archive>`", bundleName, dir)
+			return "", fmt.Errorf("bundle %s is not installed; place it under %s or run `kubeapt bundles import --from <archive>`", bundleName, dir)
 		}
 		version = versions[len(versions)-1]
 	}
 
 	ok, err := bundleVersionExists(bundleName, version)
 	if err != nil {
-		return "", "", err
+		return "", err
 	}
 	if !ok {
 		dir, err := config.BundleDir(bundleName)
 		if err != nil {
-			return "", "", err
+			return "", err
 		}
-		return "", "", fmt.Errorf("bundle %s version %s is not found in %s", bundleName, version, dir)
+		return "", fmt.Errorf("bundle %s version %s is not found in %s", bundleName, version, dir)
+	}
+	return version, nil
+}
+
+// locateInstalledBundle resolves an installed bundle to its policies and
+// bindings paths. An empty bundleVersion selects the newest installed version.
+// Every failure explains which command would fix it.
+func locateInstalledBundle(bundleName, bundleVersion string) (policiesPath, bindingsPath string, err error) {
+	version, err := resolveInstalledBundleVersion(bundleName, bundleVersion)
+	if err != nil {
+		return "", "", err
 	}
 
-	policiesPath, bindingsPath, ok, err = config.LocateBundleFiles(bundleName, version)
+	policiesPath, bindingsPath, ok, err := config.LocateBundleFiles(bundleName, version)
 	if err != nil {
 		return "", "", err
 	}
@@ -1513,50 +1520,19 @@ func loadUnstructuredResources(files []string) ([]*unstructured.Unstructured, er
 }
 
 func applyKustomizeResources(resources []*unstructured.Unstructured, onProgress func(), dryRun bool) error {
-	config, err := kubernetes.RESTConfig()
+	client, err := kubernetes.NewResourceClient()
 	if err != nil {
 		return err
 	}
-	dynamicClient, err := dynamic.NewForConfig(config)
-	if err != nil {
-		return err
-	}
-	discoveryClient, err := discovery.NewDiscoveryClientForConfig(config)
-	if err != nil {
-		return err
-	}
-	groupResources, err := restmapper.GetAPIGroupResources(discoveryClient)
-	if err != nil {
-		return err
-	}
-	mapper := restmapper.NewDiscoveryRESTMapper(groupResources)
 
 	for _, resource := range resources {
-		gvk := resource.GroupVersionKind()
-		if gvk.Empty() {
-			return fmt.Errorf("resource is missing apiVersion or kind")
-		}
-		mapping, err := mapper.RESTMapping(gvk.GroupKind(), gvk.Version)
+		target, err := client.Resolve(resource, "")
 		if err != nil {
 			return err
 		}
 		name := resource.GetName()
 		if name == "" {
-			return fmt.Errorf("resource %s missing metadata.name", gvk.String())
-		}
-		var client dynamic.ResourceInterface
-		if mapping.Scope.Name() == meta.RESTScopeNameNamespace {
-			namespaceName := resource.GetNamespace()
-			if namespaceName == "" {
-				namespaceName = kubernetes.ActiveNamespace()
-				if namespaceName == "" {
-					namespaceName = "default"
-				}
-				resource.SetNamespace(namespaceName)
-			}
-			client = dynamicClient.Resource(mapping.Resource).Namespace(namespaceName)
-		} else {
-			client = dynamicClient.Resource(mapping.Resource)
+			return fmt.Errorf("resource %s missing metadata.name", resource.GroupVersionKind().String())
 		}
 		payload, err := json.Marshal(resource.Object)
 		if err != nil {
@@ -1568,7 +1544,7 @@ func applyKustomizeResources(resources []*unstructured.Unstructured, onProgress 
 		if dryRun {
 			opts.DryRun = []string{metav1.DryRunAll}
 		}
-		_, err = client.Patch(context.TODO(), name, types.ApplyPatchType, payload, opts)
+		_, err = target.Client.Patch(context.TODO(), name, types.ApplyPatchType, payload, opts)
 		if err != nil {
 			return err
 		}
@@ -1580,57 +1556,26 @@ func applyKustomizeResources(resources []*unstructured.Unstructured, onProgress 
 }
 
 func deleteKustomizeResources(resources []*unstructured.Unstructured, onProgress func(), dryRun bool) error {
-	config, err := kubernetes.RESTConfig()
+	client, err := kubernetes.NewResourceClient()
 	if err != nil {
 		return err
 	}
-	dynamicClient, err := dynamic.NewForConfig(config)
-	if err != nil {
-		return err
-	}
-	discoveryClient, err := discovery.NewDiscoveryClientForConfig(config)
-	if err != nil {
-		return err
-	}
-	groupResources, err := restmapper.GetAPIGroupResources(discoveryClient)
-	if err != nil {
-		return err
-	}
-	mapper := restmapper.NewDiscoveryRESTMapper(groupResources)
 
 	for i := len(resources) - 1; i >= 0; i-- {
 		resource := resources[i]
-		gvk := resource.GroupVersionKind()
-		if gvk.Empty() {
-			return fmt.Errorf("resource is missing apiVersion or kind")
-		}
-		mapping, err := mapper.RESTMapping(gvk.GroupKind(), gvk.Version)
+		target, err := client.Resolve(resource, "")
 		if err != nil {
 			return err
 		}
 		name := resource.GetName()
 		if name == "" {
-			return fmt.Errorf("resource %s missing metadata.name", gvk.String())
-		}
-		var client dynamic.ResourceInterface
-		if mapping.Scope.Name() == meta.RESTScopeNameNamespace {
-			namespaceName := resource.GetNamespace()
-			if namespaceName == "" {
-				namespaceName = kubernetes.ActiveNamespace()
-				if namespaceName == "" {
-					namespaceName = "default"
-				}
-				resource.SetNamespace(namespaceName)
-			}
-			client = dynamicClient.Resource(mapping.Resource).Namespace(namespaceName)
-		} else {
-			client = dynamicClient.Resource(mapping.Resource)
+			return fmt.Errorf("resource %s missing metadata.name", resource.GroupVersionKind().String())
 		}
 		opts := metav1.DeleteOptions{}
 		if dryRun {
 			opts.DryRun = []string{metav1.DryRunAll}
 		}
-		err = client.Delete(context.TODO(), name, opts)
+		err = target.Client.Delete(context.TODO(), name, opts)
 		if apierrors.IsNotFound(err) {
 			if onProgress != nil {
 				onProgress()

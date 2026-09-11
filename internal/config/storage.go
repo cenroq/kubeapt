@@ -21,6 +21,7 @@ const (
 	policiesDirName        = "policies"
 	bundlePoliciesFilename = "policies.yaml"
 	bundleBindingsFilename = "bindings.yaml"
+	bundleProbesDirName    = "probes"
 )
 
 func KubeaptDir() (string, error) {
@@ -69,6 +70,19 @@ func BundleBindingsPath(bundleName, version string) (string, error) {
 		return "", err
 	}
 	return filepath.Join(root, bundleBindingsFilename), nil
+}
+
+// BundleProbesPath returns the directory holding a probe bundle's manifests.
+//
+// Unlike policies.yaml and bindings.yaml this is a directory, because a probe
+// bundle ships one manifest per technique and the filename is what names the
+// probe when the manifest does not annotate an id.
+func BundleProbesPath(bundleName, version string) (string, error) {
+	root, err := BundleVersionDir(bundleName, version)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(root, bundleProbesDirName), nil
 }
 
 func BundleManifestPath(bundleName, version string) (string, error) {

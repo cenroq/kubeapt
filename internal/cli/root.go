@@ -54,6 +54,10 @@ func init() {
 	rootCmd.AddCommand(BundleCmd())
 	rootCmd.AddCommand(PoliciesCmd())
 	rootCmd.AddCommand(ConvertCmd())
+	// analyze is implemented and tested but deliberately not registered: its
+	// default probe bundle does not exist yet, so the command would fail on
+	// first run. Re-add rootCmd.AddCommand(AnalyzeCmd()) once the probe corpus
+	// ships inside the policy bundles.
 }
 
 func getLogLevel() string {
