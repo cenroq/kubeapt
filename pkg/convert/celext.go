@@ -31,16 +31,34 @@ type KyvernoCELExtension struct {
 // ValidatingAdmissionPolicy-equivalent cel-go environment and treat any failure
 // as a portability finding - needs the declarations in
 // k8s.io/apiserver/pkg/cel/library (quantity, format, url, authorizer, sets,
-// ip, cidr, semver, and more). kubeapt does not depend on k8s.io/apiserver, and
-// pulling it in for this would drag in the etcd client. Without those
-// declarations the check would reject perfectly valid ValidatingAdmissionPolicy
-// CEL such as quantity("1Gi") < quantity("2Gi"), and a false positive on valid
-// input is worse than missing an exotic extension. So this table trades recall
-// for precision on purpose; please do not re-litigate it without also solving
-// the dependency problem.
+// ip, cidr, semver, and more).
 //
-// Note also that internal/cel/validate.go declares "resource" as a CEL
-// variable, which makes that environment unsuitable as an oracle here.
+// The dependency objection this comment used to record is now obsolete on both
+// counts. kubeapt does depend on k8s.io/apiserver: internal/cel builds its
+// environment from it, so those declarations are available here for the asking.
+// And the stated cost was wrong - importing pkg/cel/environment and
+// pkg/admission/plugin/cel pulls in neither etcd nor gRPC, and measured at
+// +2.9MB on the binary. (pkg/admission/plugin/policy/validating is the package
+// that does pull the whole admission runtime, 1062 packages against
+// plugin/cel's 477. Avoid that one.) internal/cel also no longer declares a
+// "resource" variable, so its environment is no longer disqualified as an
+// oracle on that ground either.
+//
+// The table still stands, for reasons that have nothing to do with
+// dependencies. A compile failure is not the same thing as non-portability: a
+// typo, a type error, or a variable Kyverno supplies under another name would
+// all be reported as portability findings, and a false positive on valid input
+// is worse than missing an exotic extension. The per-extension Hint below is
+// also the actual value here, and "undeclared reference to 'resource'" cannot
+// replace "fetch the data into a paramKind instead". Doing it properly would
+// mean modelling Kyverno's environment and diffing the two, which relocates the
+// hand-maintenance to a place with no upstream to track rather than removing
+// it. So this table trades recall for precision on purpose.
+//
+// The better use of the dependency, if someone wants one, is the inverse:
+// compile the ValidatingAdmissionPolicy that convert emits and refuse to output
+// one that will not load on a cluster. That checks kubeapt's own output rather
+// than classifying user input, so it has no false-positive problem.
 var KyvernoCELExtensions = []KyvernoCELExtension{
 	{Name: "resource.Get", Level: LevelError, Hint: "a ValidatingAdmissionPolicy can only see the request, so fetch the data into a paramKind instead"},
 	{Name: "resource.List", Level: LevelError, Hint: "a ValidatingAdmissionPolicy can only see the request, so fetch the data into a paramKind instead"},
