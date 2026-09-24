@@ -4,6 +4,8 @@
 package cli
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
 
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
@@ -101,8 +103,10 @@ func TestBuildPolicyJSONReportFlatViolations(t *testing.T) {
 			Severity: severityLow,
 			Total:    1,
 			NonCompliant: 1,
+			URL:      policyDocsBaseURL + "/" + testPolicyUUID,
 			Violations: []violationDetail{
-				{Policy: "p1", Severity: severityLow, Resource: "r1", Message: "low msg"},
+				{Policy: "p1", Severity: severityLow, Resource: "r1", Message: "low msg",
+					URL: policyDocsBaseURL + "/" + testPolicyUUID},
 			},
 		},
 		{
@@ -117,6 +121,17 @@ func TestBuildPolicyJSONReportFlatViolations(t *testing.T) {
 	}
 
 	all := buildPolicyJSONReport("all", reports, nil, nil)
+	encoded, err := json.Marshal(all)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(encoded), `"url":"`+policyDocsBaseURL+`/`+testPolicyUUID+`"`) {
+		t.Fatalf("expected policy url in JSON, got %s", encoded)
+	}
+	// p2 carries no uuid, so exactly one binding and one violation expose "url".
+	if got := strings.Count(string(encoded), `"url"`); got != 2 {
+		t.Fatalf(`expected "url" twice (one binding, one violation), got %d in %s`, got, encoded)
+	}
 	if len(all.Violations) != 2 {
 		t.Fatalf("expected 2 flat violations, got %d", len(all.Violations))
 	}

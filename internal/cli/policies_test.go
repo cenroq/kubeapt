@@ -69,12 +69,25 @@ func TestPolicyAnnotationsFrom(t *testing.T) {
             Annotations: map[string]string{
                 policyAnnotationDisplayName: "Demo",
                 policyAnnotationSeverity:    "high",
+                policyAnnotationUUID:        testPolicyUUID,
             },
         },
     }
     ann := policyAnnotationsFrom(policy)
     if ann.DisplayName != "Demo" || ann.Severity != "high" {
         t.Fatalf("unexpected annotations: %+v", ann)
+    }
+    if want := policyDocsBaseURL + "/" + testPolicyUUID; ann.URL != want {
+        t.Fatalf("URL = %q, want %q", ann.URL, want)
+    }
+
+    bare := admissionregistrationv1.ValidatingAdmissionPolicy{
+        ObjectMeta: metav1.ObjectMeta{
+            Annotations: map[string]string{policyAnnotationDisplayName: "Demo"},
+        },
+    }
+    if got := policyAnnotationsFrom(bare); got.URL != "" {
+        t.Fatalf("policy without a uuid must have no URL, got %q", got.URL)
     }
 }
 

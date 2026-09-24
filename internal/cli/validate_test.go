@@ -190,6 +190,74 @@ func TestPrintNamespaceTableShowsSeverityColumns(t *testing.T) {
     }
 }
 
+func TestViolationLogsIncludeLinkOnlyWhenURLSet(t *testing.T) {
+    url := policyDocsBaseURL + "/" + testPolicyUUID
+    linked := violationDetail{Policy: "p1", Binding: "b1", Severity: severityCritical,
+        Resource: "Pod ns/a", Message: "boom", URL: url}
+    bare := violationDetail{Policy: "p2", Binding: "b2", Severity: severityLow,
+        Resource: "Pod ns/b", Message: "meh"}
+
+    cases := []struct {
+        name   string
+        render func(w *bytes.Buffer, violations []violationDetail)
+    }{
+        {"policy", func(w *bytes.Buffer, v []violationDetail) {
+            printViolationLogs([]*bindingReport{{Policy: "p", Violations: v}}, w, false)
+        }},
+        {"namespace", func(w *bytes.Buffer, v []violationDetail) {
+            printNamespaceViolationLogs([]namespaceReport{{Namespace: "ns", Violations: v}}, w, false)
+        }},
+        {"resource", func(w *bytes.Buffer, v []violationDetail) {
+            printResourceViolationLogs([]resourceReport{{Kind: "Pod", Resource: "a", Violations: v}}, w, false)
+        }},
+    }
+
+    for _, tc := range cases {
+        t.Run(tc.name, func(t *testing.T) {
+            var withURL bytes.Buffer
+            tc.render(&withURL, []violationDetail{linked})
+            if !strings.Contains(withURL.String(), url) {
+                t.Errorf("expected link %q in output:\n%s", url, withURL.String())
+            }
+
+            var withoutURL bytes.Buffer
+            tc.render(&withoutURL, []violationDetail{bare})
+            if strings.Contains(withoutURL.String(), "Link") {
+                t.Errorf("violation without a uuid must not render a link:\n%s", withoutURL.String())
+            }
+            if strings.Contains(withoutURL.String(), policyDocsBaseURL) {
+                t.Errorf("no fallback URL expected:\n%s", withoutURL.String())
+            }
+        })
+    }
+}
+
+func TestPrintSummaryTablesHyperlinksPolicyOnlyWithColor(t *testing.T) {
+    url := policyDocsBaseURL + "/" + testPolicyUUID
+    reports := []*bindingReport{
+        {Policy: "hostpid", Severity: severityCritical, Total: 3, NonCompliant: 3, URL: url},
+        {Policy: "hostipc", Severity: severityHigh, Total: 2, Compliant: 2},
+    }
+
+    var colored bytes.Buffer
+    printSummaryTables(reports, true, &colored, table.StyleDefault, true)
+    if !strings.Contains(colored.String(), "\x1b]8;;"+url) {
+        t.Errorf("expected OSC 8 hyperlink for hostpid:\n%q", colored.String())
+    }
+    if strings.Count(colored.String(), "\x1b]8;;"+policyDocsBaseURL) != 1 {
+        t.Errorf("only the policy carrying a uuid should be hyperlinked:\n%q", colored.String())
+    }
+
+    var plain bytes.Buffer
+    printSummaryTables(reports, true, &plain, table.StyleDefault, false)
+    if strings.Contains(plain.String(), "\x1b]8") {
+        t.Errorf("useColor=false must not emit escape sequences:\n%q", plain.String())
+    }
+    if !strings.Contains(plain.String(), "hostpid") {
+        t.Errorf("policy name missing from plain output:\n%s", plain.String())
+    }
+}
+
 func TestBuildNamespaceJSONReportMirrorsSeverity(t *testing.T) {
     reports := []namespaceReport{
         {Namespace: "ns1", Total: 5, Compliant: 3, NonCompliant: 2,

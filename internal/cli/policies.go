@@ -64,6 +64,7 @@ type policyAnnotations struct {
 	Severity    string `json:"severity"`
 	Remediation string `json:"remediation"`
 	Product     string `json:"product"`
+	URL         string `json:"url,omitempty"`
 }
 
 func PoliciesCmd() *cobra.Command {
@@ -459,6 +460,9 @@ func runPolicyShow(cmd *cobra.Command, policyName, version, format string) error
 		t.AppendRow(table.Row{"severity", annotations.Severity})
 		t.AppendRow(table.Row{"remediation", annotations.Remediation})
 		t.AppendRow(table.Row{"product", annotations.Product})
+		if annotations.URL != "" {
+			t.AppendRow(table.Row{"link", annotations.URL})
+		}
 		t.Render()
 	}
 	return nil
@@ -746,6 +750,7 @@ func policyAnnotationsFrom(policy admissionregistrationv1.ValidatingAdmissionPol
 	annotations.Severity = strings.TrimSpace(meta[policyAnnotationSeverity])
 	annotations.Remediation = strings.TrimSpace(meta[policyAnnotationRemediation])
 	annotations.Product = strings.TrimSpace(meta[policyAnnotationProduct])
+	annotations.URL = policyURLFromAnnotations(meta)
 	return annotations
 }
 

@@ -744,6 +744,7 @@ func runBundleShow(cmd *cobra.Command, bundleName, version, format string) error
 			return err
 		}
 
+		policyURLs := policyURLMap(policies)
 		policyNames := make([]string, 0, len(policies))
 		policySet := make(map[string]struct{}, len(policies))
 		for _, policy := range policies {
@@ -787,11 +788,11 @@ func runBundleShow(cmd *cobra.Command, bundleName, version, format string) error
 		t := table.NewWriter()
 		t.SetOutputMirror(out)
 		t.SetStyle(table.StyleRounded)
-		t.AppendHeader(table.Row{"Policy", "Bindings", "Mode"})
+		t.AppendHeader(table.Row{"Policy", "Bindings", "Mode", "Link"})
 		for _, policyName := range policyNames {
 			infos := bindingMap[policyName]
 			if len(infos) == 0 {
-				t.AppendRow(table.Row{policyName, "-", "-"})
+				t.AppendRow(table.Row{policyName, "-", "-", policyURLs[policyName]})
 				continue
 			}
 			bindingLines := make([]string, 0, len(infos))
@@ -804,6 +805,7 @@ func runBundleShow(cmd *cobra.Command, bundleName, version, format string) error
 				policyName,
 				strings.Join(bindingLines, "\n"),
 				strings.Join(modeLines, "\n"),
+				policyURLs[policyName],
 			})
 		}
 		t.Render()

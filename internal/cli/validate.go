@@ -48,6 +48,7 @@ type violationDetail struct {
 	Message  string   `json:"message"`
 	Path     string   `json:"path"`
 	Actions  []string `json:"actions"`
+	URL      string   `json:"url,omitempty"`
 }
 
 type bindingReport struct {
@@ -55,6 +56,7 @@ type bindingReport struct {
 	Binding      string            `json:"binding"`
 	Severity     string            `json:"severity"`
 	Mode         string            `json:"mode"`
+	URL          string            `json:"url,omitempty"`
 	Total        int               `json:"total"`
 	Compliant    int               `json:"compliant"`
 	NonCompliant int               `json:"nonCompliant"`
@@ -602,11 +604,13 @@ func evaluatePolicyReports(policies []admissionregistrationv1.ValidatingAdmissio
 		if severity == "" {
 			severity = severityNotRated
 		}
+		policyURL := policyURLFromAnnotations(policy.Annotations)
 		bReport := &bindingReport{
 			Policy:   policy.Name,
 			Binding:  binding.Name,
 			Severity: severity,
 			Mode:     bindingMode(binding),
+			URL:      policyURL,
 		}
 
 		logging.Debugf("Evaluating binding %s targeting policy %s", binding.Name, policy.Name)
@@ -678,6 +682,7 @@ func evaluatePolicyReports(policies []admissionregistrationv1.ValidatingAdmissio
 								Message:  violation.Message,
 								Path:     violation.Path,
 								Actions:  violation.Actions,
+								URL:      policyURL,
 							}
 						}
 						mu.Lock()
@@ -1334,7 +1339,7 @@ func renderReport(reportMode, outputFormat string, reports []*bindingReport, res
 	case "json":
 		return renderJSONReport(reportMode, reports, resourceTotals, resourceDetails, w)
 	case "table":
-		printSummaryTables(reports, hideBindingInfo, w, style)
+		printSummaryTables(reports, hideBindingInfo, w, style, useColor)
 		printResourceTotals(resourceTotals, w, style)
 		if reportMode == "all" {
 			printViolationLogs(reports, w, useColor)
@@ -1598,6 +1603,9 @@ func printResourceViolationLogs(reports []resourceReport, w io.Writer, useColor 
 			} else {
 				fmt.Fprintf(w, "[%s] Policy %s / Binding %s\n", label, violation.Policy, violation.Binding)
 			}
+			if violation.URL != "" {
+				fmt.Fprintf(w, "Link    : %s\n", violation.URL)
+			}
 			fmt.Fprintf(w, "Message : %s\n", violation.Message)
 		}
 	}
@@ -1692,6 +1700,9 @@ func printNamespaceViolationLogs(reports []namespaceReport, w io.Writer, useColo
 				fmt.Fprintf(w, "[%s] Policy %s / Binding %s\n", label, violation.Policy, violation.Binding)
 			}
 			fmt.Fprintf(w, "Resource : %s\n", violation.Resource)
+			if violation.URL != "" {
+				fmt.Fprintf(w, "Link     : %s\n", violation.URL)
+			}
 			fmt.Fprintf(w, "Message  : %s\n", violation.Message)
 		}
 	}
@@ -1700,7 +1711,18 @@ func printNamespaceViolationLogs(reports []namespaceReport, w io.Writer, useColo
 	}
 }
 
-func printSummaryTables(reports []*bindingReport, hideBindingInfo bool, w io.Writer, style table.Style) {
+// linkedPolicyName renders a policy name as an OSC 8 hyperlink to its cenroq
+// page. text.Hyperlink, unlike fatih/color, does not disable itself on a
+// non-TTY, so plain output is gated on the same useColor flag as the rest of
+// the report.
+func linkedPolicyName(name, url string, useColor bool) string {
+	if !useColor || url == "" {
+		return name
+	}
+	return text.Hyperlink(url, name)
+}
+
+func printSummaryTables(reports []*bindingReport, hideBindingInfo bool, w io.Writer, style table.Style, useColor bool) {
 	if len(reports) == 0 {
 		fmt.Fprintln(w, "No policies evaluated.")
 		return
@@ -1718,10 +1740,11 @@ func printSummaryTables(reports []*bindingReport, hideBindingInfo bool, w io.Wri
 	}
 	var totalTotal, totalCompliant, totalNon int
 	for _, br := range reports {
+		policyCell := linkedPolicyName(br.Policy, br.URL, useColor)
 		if hideBindingInfo {
-			t.AppendRow(table.Row{br.Policy, br.Severity, br.Total, br.Compliant, br.NonCompliant})
+			t.AppendRow(table.Row{policyCell, br.Severity, br.Total, br.Compliant, br.NonCompliant})
 		} else {
-			t.AppendRow(table.Row{br.Policy, br.Binding, br.Severity, br.Mode, br.Total, br.Compliant, br.NonCompliant})
+			t.AppendRow(table.Row{policyCell, br.Binding, br.Severity, br.Mode, br.Total, br.Compliant, br.NonCompliant})
 		}
 		totalTotal += br.Total
 		totalCompliant += br.Compliant
@@ -1813,6 +1836,9 @@ func printViolationLogs(reports []*bindingReport, w io.Writer, useColor bool) {
 			fmt.Fprintf(w, "[%s] Policy %s\n", label, violation.Policy)
 		}
 		fmt.Fprintf(w, "Resource : %s\n", violation.Resource)
+		if violation.URL != "" {
+			fmt.Fprintf(w, "Link     : %s\n", violation.URL)
+		}
 		fmt.Fprintf(w, "Message  : %s\n", violation.Message)
 	}
 }
