@@ -13,6 +13,7 @@ import (
 	"github.com/cenroq/kubeapt/v2/internal/logging"
 )
 
+// When changing, align flake.nix too
 const appVersion = "2.1.0"
 
 var (

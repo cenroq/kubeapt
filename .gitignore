@@ -41,3 +41,7 @@ tmp/
 /docs/package-lock.json
 /docs/.yarn
 /docs/.docusaurus
+
+# Nix
+result
+.direnv/
