@@ -10,6 +10,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
 	"github.com/cenroq/kubeapt/v2/pkg/analyze"
+	"github.com/cenroq/kubeapt/v2/pkg/policies"
 	"github.com/cenroq/kubeapt/v2/pkg/types"
 )
 
@@ -238,4 +239,104 @@ func TestNewProbeRejectsInvalidObjects(t *testing.T) {
 			t.Fatal("expected an error for a missing apiVersion and kind")
 		}
 	})
+}
+
+// The policy's title wins over the probe's because a shipped deny manifest has
+// none of its own; the probe's description wins because one it does carry is
+// more specific than its policy's.
+func TestProbeTitleAndSummaryFallbacks(t *testing.T) {
+	tests := []struct {
+		name        string
+		probe       analyze.Probe
+		wantTitle   string
+		wantSummary string
+	}{
+		{
+			name:        "no policy",
+			probe:       analyze.Probe{DisplayName: "Pod p", Description: "own"},
+			wantTitle:   "Pod p",
+			wantSummary: "own",
+		},
+		{
+			name:        "policy titled",
+			probe:       analyze.Probe{DisplayName: "Pod p", Policy: &analyze.PolicyRef{DisplayName: "Host PID", Description: "policy"}},
+			wantTitle:   "Host PID",
+			wantSummary: "policy",
+		},
+		{
+			name:        "policy untitled",
+			probe:       analyze.Probe{DisplayName: "Pod p", Description: "own", Policy: &analyze.PolicyRef{Name: "pod-hostpid", Description: "policy"}},
+			wantTitle:   "Pod p",
+			wantSummary: "own",
+		},
+		{
+			name:        "nothing",
+			probe:       analyze.Probe{},
+			wantTitle:   "",
+			wantSummary: "",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.probe.Title(); got != tc.wantTitle {
+				t.Errorf("Title() = %q, want %q", got, tc.wantTitle)
+			}
+			if got := tc.probe.Summary(); got != tc.wantSummary {
+				t.Errorf("Summary() = %q, want %q", got, tc.wantSummary)
+			}
+		})
+	}
+}
+
+func TestProbeDocsURL(t *testing.T) {
+	if got := (analyze.Probe{}).DocsURL(); got != "" {
+		t.Errorf("no uuid: DocsURL() = %q, want empty", got)
+	}
+	if got := (analyze.Probe{UUID: "abc"}).DocsURL(); got != policies.DocsBaseURL+"/abc" {
+		t.Errorf("DocsURL() = %q", got)
+	}
+}
+
+func TestNewProbeReadsAndStripsUUID(t *testing.T) {
+	raw := `{"apiVersion":"v1","kind":"Pod","metadata":{"name":"p","annotations":{"kubeapt.io/uuid":"  abc  "}}}`
+	p, err := analyze.NewProbe(object(t, raw), "")
+	if err != nil {
+		t.Fatalf("NewProbe: %v", err)
+	}
+	if p.UUID != "abc" {
+		t.Errorf("UUID = %q, want trimmed abc", p.UUID)
+	}
+	if _, present := p.Object.GetAnnotations()[analyze.AnnotationUUID]; present {
+		t.Error("kubeapt.io/uuid reached the object under test")
+	}
+}
+
+// Shipped probes violate their policy *through* annotations. Stripping one of
+// those would submit a compliant object and report a false pass, so only
+// kubeapt's own prefixes may go.
+func TestNewProbeKeepsViolatingAnnotations(t *testing.T) {
+	raw := `{"apiVersion":"v1","kind":"Pod","metadata":{"name":"p","annotations":{
+	  "container.apparmor.security.beta.kubernetes.io/main": "unconfined",
+	  "nginx.ingress.kubernetes.io/server-snippet": "return 200;",
+	  "kubeapt.io/uuid": "u",
+	  "analyze.kubeapt.io/id": "i",
+	  "security.kubeapt.io/severity": "High"
+	}}}`
+	p, err := analyze.NewProbe(object(t, raw), "")
+	if err != nil {
+		t.Fatalf("NewProbe: %v", err)
+	}
+	got := p.Object.GetAnnotations()
+	want := map[string]string{
+		"container.apparmor.security.beta.kubernetes.io/main": "unconfined",
+		"nginx.ingress.kubernetes.io/server-snippet":          "return 200;",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("annotations = %v, want %v", got, want)
+	}
+	for key, value := range want {
+		if got[key] != value {
+			t.Errorf("annotation %s = %q, want %q", key, got[key], value)
+		}
+	}
 }

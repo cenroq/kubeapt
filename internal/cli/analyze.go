@@ -5,43 +5,31 @@ package cli
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
-	"errors"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/fatih/color"
 	"github.com/jedib0t/go-pretty/v6/table"
 	"github.com/jedib0t/go-pretty/v6/text"
 	"github.com/spf13/cobra"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/cenroq/kubeapt/v2/internal/config"
 	"github.com/cenroq/kubeapt/v2/internal/format"
 	"github.com/cenroq/kubeapt/v2/internal/kubernetes"
 	"github.com/cenroq/kubeapt/v2/internal/logging"
-	"github.com/cenroq/kubeapt/v2/internal/worker"
 	"github.com/cenroq/kubeapt/v2/pkg/analyze"
 )
 
-const (
-	// defaultProbeBundle is a placeholder, not a published bundle. No bundle of
-	// this name exists in the index, so the default only resolves once a probe
-	// corpus ships and the published name is confirmed. Until then --probes is
-	// the only working source, which is why the command is not registered in
-	// root.go.
-	defaultProbeBundle = "admission-probes"
-	// maxProbeNameLength is 253 (the API server's name limit) minus the 17
-	// characters collisionFreeName appends: "-kubeapt-" plus eight hex digits.
-	maxProbeNameLength = 236
-)
+// defaultProbeBundle is the bundle analyze probes when none is named. Probes
+// ship inside a policy bundle's probes/ directory, one deny manifest per
+// policy, so the flagship bundle is also the broadest probe corpus.
+const defaultProbeBundle = "cenroq-best-practices"
 
 type analyzeRequest struct {
 	bundleName        string
@@ -126,12 +114,14 @@ func runAnalyze(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
-	namespaces, err := resolveAnalyzeNamespaces(request)
+	// The client comes first: building it loads the kubeconfig, which is what
+	// sets the active namespace resolveAnalyzeNamespaces falls back to.
+	client, err := kubernetes.NewResourceClient()
 	if err != nil {
 		return err
 	}
 
-	client, err := kubernetes.NewResourceClient()
+	namespaces, err := resolveAnalyzeNamespaces(request)
 	if err != nil {
 		return err
 	}
@@ -154,14 +144,17 @@ func runAnalyze(cmd *cobra.Command, _ []string) error {
 	}
 
 	startTime := time.Now()
-	units, results := planProbeUnits(client, probes, namespaces)
 
-	tracker, stop := startProgress("Submitting probes", maxInt64(int64(len(units)), 1), progressEnabled)
-	executed := executeProbeUnits(cmd.Context(), client, units, request.timeout, func() {
-		tracker.Increment(1)
-	})
+	// One unit per namespaced probe per namespace, plus one per cluster-scoped
+	// probe. The exact count is not known until the runner resolves each kind,
+	// so the tracker is sized on the upper bound.
+	tracker, stop := startProgress("Submitting probes",
+		maxInt64(int64(len(probes)*maxInt(len(namespaces), 1)), 1), progressEnabled)
+	runner := analyze.NewRunner(kubernetes.NewProbeSubmitter(client))
+	runner.Timeout = request.timeout
+	runner.OnResult = func() { tracker.Increment(1) }
+	results := runner.Run(cmd.Context(), probes, namespaces)
 	stop()
-	results = append(results, executed...)
 	sortAnalyzeResults(results)
 	stopTime := time.Now()
 
@@ -268,68 +261,40 @@ func splitCommaList(raw string) []string {
 	return out
 }
 
-// loadProbes reads the probe catalogue from a local path or an installed bundle.
+// loadProbes reads the probe corpus from a local path or an installed bundle.
+//
+// A bundle is loaded whole so each probe's uuid resolves against the bundle's
+// own policies.yaml: a deny manifest carries only kubeapt.io/uuid, so the
+// policy name, severity and catalogue link all come from that join.
 func loadProbes(request analyzeRequest) ([]analyze.Probe, error) {
-	source, err := resolveProbeSource(request)
-	if err != nil {
-		return nil, err
-	}
-	files, err := config.CollectManifestFilesRecursive(source)
-	if err != nil {
-		return nil, err
-	}
-
-	var probes []analyze.Probe
-	seen := map[string]string{}
-	for _, file := range files {
-		objects, err := loadUnstructuredResources([]string{file})
-		if err != nil {
-			return nil, fmt.Errorf("failed to read probe %s: %w", file, err)
-		}
-		// The filename names the probe only when it holds exactly one, so a
-		// multi-document file cannot mint duplicate ids.
-		sourceFile := file
-		if len(objects) != 1 {
-			sourceFile = ""
-		}
-		for _, object := range objects {
-			probe, err := analyze.NewProbe(object, sourceFile)
-			if err != nil {
-				return nil, fmt.Errorf("%s: %w", file, err)
-			}
-			if previous, clash := seen[probe.ID]; clash {
-				return nil, fmt.Errorf("duplicate probe id %q in %s and %s", probe.ID, previous, file)
-			}
-			seen[probe.ID] = file
-			probes = append(probes, probe)
-		}
-	}
-	if len(probes) == 0 {
-		return nil, fmt.Errorf("no probe manifests found in %s", source)
-	}
-
-	sort.Slice(probes, func(i, j int) bool { return probes[i].ID < probes[j].ID })
-	return probes, nil
-}
-
-func resolveProbeSource(request analyzeRequest) (string, error) {
 	if request.probesPath != "" {
-		return request.probesPath, nil
+		info, err := os.Stat(request.probesPath)
+		if err != nil {
+			return nil, err
+		}
+		if !info.IsDir() {
+			return analyze.LoadProbeFile(os.DirFS(filepath.Dir(request.probesPath)), filepath.Base(request.probesPath))
+		}
+		// A local set may be a whole bundle or a bare probes/ directory.
+		if _, err := os.Stat(filepath.Join(request.probesPath, analyze.ProbesDirName)); err == nil {
+			return analyze.LoadBundle(os.DirFS(request.probesPath), ".")
+		}
+		return analyze.LoadProbes(os.DirFS(request.probesPath), ".")
 	}
 
 	version, err := resolveInstalledBundleVersion(request.bundleName, request.bundleVersion)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	probesPath, err := config.BundleProbesPath(request.bundleName, version)
+	root, err := config.BundleVersionDir(request.bundleName, version)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	info, err := os.Stat(probesPath)
-	if err != nil || !info.IsDir() {
-		return "", fmt.Errorf("bundle %s %s has no probes/ directory; it is a policy bundle, not a probe bundle", request.bundleName, version)
+	probesPath := filepath.Join(root, analyze.ProbesDirName)
+	if info, err := os.Stat(probesPath); err != nil || !info.IsDir() {
+		return nil, fmt.Errorf("bundle %s %s ships no probes/ directory; re-download it to get one", request.bundleName, version)
 	}
-	return probesPath, nil
+	return analyze.LoadBundle(os.DirFS(root), ".")
 }
 
 func filterProbes(probes []analyze.Probe, ids []string) ([]analyze.Probe, error) {
@@ -403,139 +368,6 @@ func allNamespaceNames() ([]string, error) {
 	return names, nil
 }
 
-// probeUnit is one probe submitted into one namespace.
-type probeUnit struct {
-	probe     analyze.Probe
-	namespace string
-}
-
-// planProbeUnits expands the catalogue into work, fanning namespaced probes out
-// across the selected namespaces while leaving cluster-scoped probes as a
-// single unit. Probes whose kind the cluster does not serve resolve straight to
-// a Skipped result and are never submitted.
-func planProbeUnits(client *kubernetes.ResourceClient, probes []analyze.Probe, namespaces []string) ([]probeUnit, []analyze.Result) {
-	var units []probeUnit
-	var results []analyze.Result
-
-	for _, probe := range probes {
-		scout := probe.Object.DeepCopy()
-		target, err := client.Resolve(scout, "")
-		if err != nil {
-			if errors.Is(err, kubernetes.ErrKindNotServed) {
-				results = append(results, analyze.SkippedResult(probe, "", err.Error()))
-			} else {
-				results = append(results, analyze.ErrorResult(probe, "", err.Error()))
-			}
-			continue
-		}
-		if !target.Namespaced {
-			units = append(units, probeUnit{probe: probe})
-			continue
-		}
-		for _, namespace := range namespaces {
-			units = append(units, probeUnit{probe: probe, namespace: namespace})
-		}
-	}
-	return units, results
-}
-
-func executeProbeUnits(ctx context.Context, client *kubernetes.ResourceClient, units []probeUnit, timeout time.Duration, onUnit func()) []analyze.Result {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if len(units) == 0 {
-		return nil
-	}
-
-	results := make([]analyze.Result, len(units))
-	queue := make(chan int)
-	var wg sync.WaitGroup
-
-	for w := 0; w < worker.WorkerLimit(len(units)); w++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for index := range queue {
-				results[index] = runProbeUnit(ctx, client, units[index], timeout)
-				if onUnit != nil {
-					onUnit()
-				}
-			}
-		}()
-	}
-	for index := range units {
-		queue <- index
-	}
-	close(queue)
-	wg.Wait()
-
-	return results
-}
-
-func runProbeUnit(ctx context.Context, client *kubernetes.ResourceClient, unit probeUnit, timeout time.Duration) analyze.Result {
-	object := unit.probe.Object.DeepCopy()
-	target, err := client.Resolve(object, unit.namespace)
-	if err != nil {
-		if errors.Is(err, kubernetes.ErrKindNotServed) {
-			return analyze.SkippedResult(unit.probe, unit.namespace, err.Error())
-		}
-		return analyze.ErrorResult(unit.probe, unit.namespace, err.Error())
-	}
-
-	// Ask before submitting. An RBAC refusal and an admission refusal are both
-	// 403, and treating the former as a block would report an inaccessible
-	// cluster as a defended one.
-	allowed, err := client.CanCreate(ctx, target)
-	if err != nil {
-		return analyze.ErrorResult(unit.probe, target.Namespace, fmt.Sprintf("access review failed: %v", err))
-	}
-	if !allowed {
-		return analyze.InconclusiveResult(unit.probe, target.Namespace, analyze.ReasonRBAC,
-			fmt.Sprintf("not permitted to create %s", target.Mapping.Resource.Resource))
-	}
-
-	requestCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	returned, err := target.DryRunCreate(requestCtx, object)
-	if apierrors.IsAlreadyExists(err) {
-		// A live object of the same name would make this an update rather than
-		// a create, which fires a different set of admission rules. Retry once
-		// under a name that cannot collide.
-		object = unit.probe.Object.DeepCopy()
-		object.SetName(collisionFreeName(unit.probe.Object.GetName()))
-		retryTarget, retryErr := client.Resolve(object, unit.namespace)
-		if retryErr != nil {
-			return analyze.ErrorResult(unit.probe, target.Namespace, retryErr.Error())
-		}
-		returned, err = retryTarget.DryRunCreate(requestCtx, object)
-	}
-
-	return analyze.Classify(unit.probe, target.Namespace, object, returned, err)
-}
-
-// collisionFreeName appends random hex to a probe's name so a retry cannot hit
-// an existing object.
-func collisionFreeName(base string) string {
-	suffix := make([]byte, 4)
-	if _, err := rand.Read(suffix); err != nil {
-		// crypto/rand does not fail in practice; a fixed suffix still beats
-		// retrying under the colliding name.
-		return trimName(base) + "-kubeapt"
-	}
-	return trimName(base) + "-kubeapt-" + hex.EncodeToString(suffix)
-}
-
-func trimName(base string) string {
-	if base == "" {
-		return "probe"
-	}
-	if len(base) > maxProbeNameLength {
-		base = base[:maxProbeNameLength]
-	}
-	return strings.TrimRight(base, "-.")
-}
-
 func sortAnalyzeResults(results []analyze.Result) {
 	sort.SliceStable(results, func(i, j int) bool {
 		left, right := results[i], results[j]
@@ -550,6 +382,14 @@ func sortAnalyzeResults(results []analyze.Result) {
 		}
 		return left.Namespace < right.Namespace
 	})
+}
+
+// maxInt returns the larger of two ints, for sizing the progress tracker.
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func verdictRank(v analyze.Verdict) int {
@@ -585,7 +425,7 @@ func renderAnalyzeTable(results []analyze.Result, summary analyze.Summary, repor
 	t.Style().Title.Align = text.AlignLeft
 	t.SetTitle("Admission probe results")
 
-	header := table.Row{"Verdict", "Probe", "Kind", "Namespace", "Severity", "Outcome", "Enforced by"}
+	header := table.Row{"Verdict", "Probe", "Policy", "Kind", "Namespace", "Severity", "Outcome", "Enforced by"}
 	if reportMode == "all" {
 		header = append(header, "Detail")
 		// A PSA denial runs to several hundred characters and go-pretty does
@@ -601,7 +441,8 @@ func renderAnalyzeTable(results []analyze.Result, summary analyze.Summary, repor
 	for _, result := range results {
 		row := table.Row{
 			renderVerdict(result.Verdict, useColor),
-			result.Probe.ID,
+			linkedProbeName(result.Probe, useColor),
+			policyCell(result.Probe),
 			probeKind(result.Probe),
 			namespaceCell(result.Namespace),
 			renderSeverity(string(result.Probe.Severity), useColor),
@@ -617,6 +458,8 @@ func renderAnalyzeTable(results []analyze.Result, summary analyze.Summary, repor
 	logging.Newline()
 	t.Render()
 
+	printProbeLinks(results, writer)
+
 	logging.Infof("%d probe(s): %d passed, %d failed, %d warning(s), %d inconclusive",
 		summary.Total, summary.Pass, summary.Fail, summary.Warn, summary.Inconclusive)
 	if summary.Inconclusive > 0 {
@@ -627,6 +470,69 @@ func renderAnalyzeTable(results []analyze.Result, summary analyze.Summary, repor
 	}
 	if reportMode != "all" && (summary.Fail > 0 || summary.Warn > 0 || summary.Inconclusive > 0) {
 		logging.Infof("Run with --report all to see why each verdict was reached")
+	}
+}
+
+// linkedProbeName hyperlinks a probe id to the policy page behind it. The
+// escape is gated on useColor because text.Hyperlink, unlike fatih/color, does
+// not disable itself on a non-TTY.
+func linkedProbeName(probe analyze.Probe, useColor bool) string {
+	url := probe.DocsURL()
+	if !useColor || url == "" {
+		return probe.ID
+	}
+	return text.Hyperlink(url, probe.ID)
+}
+
+// policyCell names the policy a probe tests, which a deny manifest carries only
+// as a uuid. An empty cell means the uuid did not resolve against the bundle.
+func policyCell(probe analyze.Probe) string {
+	if probe.Policy == nil {
+		return "-"
+	}
+	if probe.Policy.DisplayName != "" {
+		return probe.Policy.DisplayName
+	}
+	return probe.Policy.Name
+}
+
+// maxProbeLinks caps the link footer. A cluster enforcing nothing fails every
+// probe, and listing 150 URLs would bury the summary that says so.
+const maxProbeLinks = 20
+
+// printProbeLinks lists the catalogue page for every probe that did not pass.
+//
+// The table hyperlinks the probe id, but a terminal that cannot render OSC 8 --
+// or a report written to a file -- would otherwise lose the URL entirely, and
+// the link is the point: it is where the reader learns what the finding means.
+func printProbeLinks(results []analyze.Result, writer io.Writer) {
+	seen := map[string]bool{}
+	var lines []string
+	for _, result := range results {
+		if result.Verdict == analyze.VerdictPass {
+			continue
+		}
+		url := result.Probe.DocsURL()
+		if url == "" || seen[url] {
+			continue
+		}
+		seen[url] = true
+		lines = append(lines, fmt.Sprintf("  %-44s %s", result.Probe.ID, url))
+	}
+	if len(lines) == 0 {
+		return
+	}
+	logging.Newline()
+	fmt.Fprintln(writer, "Policy details")
+	shown := lines
+	if len(shown) > maxProbeLinks {
+		shown = shown[:maxProbeLinks]
+	}
+	for _, line := range shown {
+		fmt.Fprintln(writer, line)
+	}
+	if remaining := len(lines) - len(shown); remaining > 0 {
+		fmt.Fprintf(writer, "  ... and %d more; run with -f json for every link\n", remaining)
 	}
 }
 
@@ -713,6 +619,9 @@ type analyzeJSONResult struct {
 	DisplayName string               `json:"displayName,omitempty"`
 	Description string               `json:"description,omitempty"`
 	Category    string               `json:"category,omitempty"`
+	Policy      string               `json:"policy,omitempty"`
+	UUID        string               `json:"uuid,omitempty"`
+	URL         string               `json:"url,omitempty"`
 	Severity    string               `json:"severity"`
 	Expect      string               `json:"expect"`
 	APIVersion  string               `json:"apiVersion,omitempty"`
@@ -762,9 +671,11 @@ func buildAnalyzeJSON(results []analyze.Result, summary analyze.Summary) analyze
 	for _, result := range results {
 		entry := analyzeJSONResult{
 			Probe:       result.Probe.ID,
-			DisplayName: result.Probe.DisplayName,
-			Description: result.Probe.Description,
+			DisplayName: result.Probe.Title(),
+			Description: result.Probe.Summary(),
 			Category:    result.Probe.Category,
+			UUID:        result.Probe.UUID,
+			URL:         result.Probe.DocsURL(),
 			Severity:    string(result.Probe.Severity),
 			Expect:      string(result.Probe.Expect),
 			Namespace:   result.Namespace,
@@ -774,6 +685,9 @@ func buildAnalyzeJSON(results []analyze.Result, summary analyze.Summary) analyze
 			Detail:      result.Detail,
 			Mutations:   result.Mutations,
 			SubmittedAs: result.SubmittedName,
+		}
+		if result.Probe.Policy != nil {
+			entry.Policy = result.Probe.Policy.Name
 		}
 		if result.Probe.Object != nil {
 			entry.APIVersion = result.Probe.Object.GetAPIVersion()

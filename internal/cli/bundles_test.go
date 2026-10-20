@@ -1,11 +1,15 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 
+	"github.com/jedib0t/go-pretty/v6/table"
 	"github.com/spf13/cobra"
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 )
@@ -266,6 +270,162 @@ func TestDeprecatedBundleIndex(t *testing.T) {
 	}
 }
 
+// The rule between the current and the deprecated block is what tells a reader
+// where the superseded bundles start.
+func TestRenderBundleTableSeparatesDeprecatedBlock(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	bundles := []bundleIndexEntry{
+		{Name: "cenroq-best-practices", LatestVersion: "v0.3.0", Versions: []string{"v0.3.0"}},
+		{Name: "telekom", LatestVersion: "v5.0.0", Versions: []string{"v5.0.0"}, LocalOnly: true},
+		{Name: "kolteq-best-practices", LatestVersion: "v0.1.1", Versions: []string{"v0.1.1"}, Deprecated: 1782856800},
+	}
+
+	var buf bytes.Buffer
+	if err := renderBundleTable(bundles, nil, &buf, table.StyleDefault); err != nil {
+		t.Fatalf("renderBundleTable: %v", err)
+	}
+	out := buf.String()
+
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	var ruleAfter, lastCurrent, firstDeprecated int
+	ruleAfter = -1
+	for i, line := range lines {
+		switch {
+		case strings.Contains(line, "telekom"):
+			lastCurrent = i
+		case strings.Contains(line, "kolteq-best-practices"):
+			if firstDeprecated == 0 {
+				firstDeprecated = i
+			}
+		}
+	}
+	// Exactly one rule sits strictly between the last current row and the
+	// first deprecated one.
+	for i := lastCurrent + 1; i < firstDeprecated; i++ {
+		if isTableRule(lines[i]) {
+			ruleAfter = i
+		}
+	}
+	if ruleAfter == -1 {
+		t.Fatalf("no rule between the current and deprecated rows:\n%s", out)
+	}
+}
+
+// A listing that is entirely deprecated must not open with a doubled rule.
+func TestRenderBundleTableNoLeadingSeparator(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	bundles := []bundleIndexEntry{
+		{Name: "kolteq-best-practices", LatestVersion: "v0.1.1", Versions: []string{"v0.1.1"}, Deprecated: 1782856800},
+		{Name: "old-thing", LatestVersion: "v1.0.0", Versions: []string{"v1.0.0"}, Deprecated: 1782856800},
+	}
+
+	var buf bytes.Buffer
+	if err := renderBundleTable(bundles, nil, &buf, table.StyleDefault); err != nil {
+		t.Fatalf("renderBundleTable: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+
+	var headerRow int
+	for i, line := range lines {
+		if strings.Contains(line, "BUNDLE") {
+			headerRow = i
+			break
+		}
+	}
+	// One rule closes the header; a second would be the suppressed separator.
+	if isTableRule(lines[headerRow+1]) && isTableRule(lines[headerRow+2]) {
+		t.Fatalf("separator was emitted directly under the header:\n%s", buf.String())
+	}
+}
+
+// With nothing deprecated the table carries no extra rule at all.
+func TestRenderBundleTableNoSeparatorWhenNoneDeprecated(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	bundles := []bundleIndexEntry{
+		{Name: "a-bundle", LatestVersion: "v1", Versions: []string{"v1"}},
+		{Name: "b-bundle", LatestVersion: "v1", Versions: []string{"v1"}},
+	}
+
+	var buf bytes.Buffer
+	if err := renderBundleTable(bundles, nil, &buf, table.StyleDefault); err != nil {
+		t.Fatalf("renderBundleTable: %v", err)
+	}
+	rules := 0
+	for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+		if isTableRule(line) {
+			rules++
+		}
+	}
+	// StyleDefault draws a rule above the header, below it, and at the foot.
+	if rules != 3 {
+		t.Fatalf("rules = %d, want 3 (no deprecated separator):\n%s", rules, buf.String())
+	}
+}
+
+// isTableRule reports whether a rendered line is a horizontal rule rather than
+// a data row.
+func isTableRule(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" {
+		return false
+	}
+	return strings.IndexFunc(trimmed, func(r rune) bool {
+		return r != '-' && r != '+' && r != '\u2500' && r != '\u251c' && r != '\u2524' &&
+			r != '\u252c' && r != '\u2534' && r != '\u253c' && r != '\u256d' && r != '\u256e' &&
+			r != '\u256f' && r != '\u2570' && r != ' '
+	}) == -1
+}
+
+func TestSortBundleEntriesForDisplayPutsDeprecatedLast(t *testing.T) {
+	const older = int64(1700000000)
+	const newer = int64(1782856800)
+	entries := []bundleIndexEntry{
+		{Name: "pod-security-admission", Deprecated: newer},
+		{Name: "aaa-legacy", Deprecated: older},
+		{Name: "pod-security-admission"},
+		{Name: "cenroq-best-practices"},
+	}
+
+	sortBundleEntriesForDisplay(entries)
+
+	var got []string
+	for _, entry := range entries {
+		label := entry.Name
+		if entry.Deprecated != 0 {
+			label += " (deprecated)"
+		}
+		got = append(got, label)
+	}
+	want := []string{
+		"cenroq-best-practices",
+		"pod-security-admission",
+		"aaa-legacy (deprecated)",
+		"pod-security-admission (deprecated)",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("order = %v, want %v", got, want)
+	}
+}
+
+// The merge path pairs a deprecated entry with the current one of the same
+// name by adjacency, so it must keep the name-first order.
+func TestSortBundleEntriesKeepsDeprecatedBesideItsCurrent(t *testing.T) {
+	entries := []bundleIndexEntry{
+		{Name: "pod-security-admission", Deprecated: 1782856800},
+		{Name: "zzz-other"},
+		{Name: "pod-security-admission"},
+	}
+
+	sortBundleEntries(entries)
+
+	if entries[0].Name != "pod-security-admission" || entries[0].Deprecated != 0 {
+		t.Fatalf("entry 0 = %+v, want the current pod-security-admission", entries[0])
+	}
+	if entries[1].Name != "pod-security-admission" || entries[1].Deprecated == 0 {
+		t.Fatalf("entry 1 = %+v, want its deprecated duplicate", entries[1])
+	}
+}
+
 func TestMergeBundleIndexesDeprecatedLocalDownloads(t *testing.T) {
 	const depTS = int64(1782856800)
 	remote := []bundleIndexEntry{
@@ -308,5 +468,76 @@ func TestMergeBundleIndexesDeprecatedLocalDownloads(t *testing.T) {
 		if b.Name == "telekom" && !b.LocalOnly {
 			t.Fatalf("expected telekom to be marked local-only")
 		}
+	}
+}
+
+// The Downloaded and Installed columns line up one mark per listed version.
+func TestRenderBundleTableMarksDownloadedAndInstalled(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, ".config", "kubeapt", "bundles", "cenroq-best-practices", "v0.2.0"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	bundles := []bundleIndexEntry{
+		{Name: "cenroq-best-practices", LatestVersion: "v0.3.0", Versions: []string{"v0.3.0", "v0.2.0"}},
+		{Name: "unversioned"},
+	}
+	installed := map[string]map[string]struct{}{"cenroq-best-practices": {"v0.3.0": {}}}
+
+	var buf bytes.Buffer
+	if err := renderBundleTable(bundles, installed, &buf, table.StyleDefault); err != nil {
+		t.Fatalf("renderBundleTable: %v", err)
+	}
+	lines := strings.Split(buf.String(), "\n")
+	// row finds the line whose cell in column col reads value. Columns are
+	// "", Bundle, Origin, Latest, Deprecated, Versions, Downloaded, Installed, "".
+	row := func(col int, value string) []string {
+		for _, line := range lines {
+			if cells := strings.Split(line, "|"); len(cells) == 9 && strings.TrimSpace(cells[col]) == value {
+				return cells
+			}
+		}
+		t.Fatalf("no row with %q in column %d:\n%s", value, col, buf.String())
+		return nil
+	}
+	latest, older := row(5, "v0.3.0"), row(5, "v0.2.0")
+	if strings.TrimSpace(latest[6]) != "" || strings.TrimSpace(latest[7]) != "x" {
+		t.Errorf("v0.3.0 downloaded/installed = %q/%q, want \"\"/x", latest[6], latest[7])
+	}
+	if strings.TrimSpace(older[6]) != "x" || strings.TrimSpace(older[7]) != "" {
+		t.Errorf("v0.2.0 downloaded/installed = %q/%q, want x/\"\"", older[6], older[7])
+	}
+	if unversioned := row(1, "unversioned"); strings.TrimSpace(unversioned[3]) != "-" || strings.TrimSpace(unversioned[5]) != "-" {
+		t.Errorf("unversioned latest/versions = %q/%q, want -/-", unversioned[3], unversioned[5])
+	}
+}
+
+func TestRenderBundleTableReturnsVersionLookupError(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	bundlesDir := filepath.Join(home, ".config", "kubeapt", "bundles")
+	if err := os.MkdirAll(bundlesDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// A regular file where the bundle's directory belongs cannot be listed.
+	if err := os.WriteFile(filepath.Join(bundlesDir, "broken"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	err := renderBundleTable([]bundleIndexEntry{{Name: "broken"}}, nil, &bytes.Buffer{}, table.StyleDefault)
+	if err == nil {
+		t.Fatal("expected the version lookup error to be returned")
+	}
+}
+
+// Two deprecated generations of one bundle list oldest first, so the order is
+// stable across runs.
+func TestSortBundleEntriesForDisplayOrdersDeprecatedGenerations(t *testing.T) {
+	entries := []bundleIndexEntry{
+		{Name: "legacy", Deprecated: 1782856800},
+		{Name: "legacy", Deprecated: 1700000000},
+	}
+	sortBundleEntriesForDisplay(entries)
+	if entries[0].Deprecated != 1700000000 {
+		t.Fatalf("order = %d, %d; want the older deprecation first", entries[0].Deprecated, entries[1].Deprecated)
 	}
 }

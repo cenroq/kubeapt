@@ -480,7 +480,7 @@ func runBundleList(cmd *cobra.Command, local bool) error {
 		return nil
 	}
 
-	sortBundleEntries(bundles)
+	sortBundleEntriesForDisplay(bundles)
 
 	installedIndex := map[string]map[string]struct{}{}
 	if !local {
@@ -496,11 +496,40 @@ func runBundleList(cmd *cobra.Command, local bool) error {
 		installedIndex = index
 	}
 
+	if err := renderBundleTable(bundles, installedIndex, logging.Writer(), table.StyleRounded); err != nil {
+		return err
+	}
+	logging.Newline()
+	logging.Infof("Legend: x = version is downloaded/installed")
+
+	return nil
+}
+
+// renderBundleTable writes the listing. bundles must already be in display
+// order, which is what decides where the deprecated rule falls.
+func renderBundleTable(bundles []bundleIndexEntry, installedIndex map[string]map[string]struct{}, w io.Writer, style table.Style) error {
 	t := table.NewWriter()
-	t.SetOutputMirror(logging.Writer())
-	t.SetStyle(table.StyleRounded)
+	t.SetOutputMirror(w)
+	t.SetStyle(style)
 	t.AppendHeader(table.Row{"Bundle", "Origin", "Latest", "Deprecated", "Versions", "Downloaded", "Installed"})
+
+	// sortBundleEntriesForDisplay has grouped the deprecated entries last; a
+	// rule at the boundary makes that grouping visible rather than something
+	// the reader has to infer from the Deprecated column.
+	currentRows := 0
+	separatorDone := false
 	for _, bundle := range bundles {
+		if bundle.Deprecated != 0 && !separatorDone {
+			// Suppressed when every bundle is deprecated, where the rule would
+			// land directly under the header and read as part of it.
+			if currentRows > 0 {
+				t.AppendSeparator()
+			}
+			separatorDone = true
+		}
+		if bundle.Deprecated == 0 {
+			currentRows++
+		}
 		origin := "remote"
 		if bundle.LocalOnly {
 			origin = "local-only"
@@ -550,9 +579,6 @@ func runBundleList(cmd *cobra.Command, local bool) error {
 		t.AppendRow(table.Row{bundle.Name, origin, latest, deprecated, versions, downloaded, installed})
 	}
 	t.Render()
-	logging.Newline()
-	logging.Infof("Legend: x = version is downloaded/installed")
-
 	return nil
 }
 
@@ -1435,6 +1461,30 @@ func sortBundleEntries(entries []bundleIndexEntry) {
 		if entries[i].Name != entries[j].Name {
 			return entries[i].Name < entries[j].Name
 		}
+		return entries[i].Deprecated < entries[j].Deprecated
+	})
+}
+
+// sortBundleEntriesForDisplay orders the listing for reading: current bundles
+// first, alphabetically, with every deprecated one gathered at the bottom.
+//
+// This is deliberately not the order sortBundleEntries produces. A merge needs
+// a deprecated entry to sit directly beneath the current entry of the same
+// name, because that adjacency is what pairs them; a reader picking a bundle
+// wants the opposite, with the superseded rows out of the way. Deprecated
+// bundles stay listed rather than hidden -- their versions are still
+// downloadable -- just last.
+func sortBundleEntriesForDisplay(entries []bundleIndexEntry) {
+	sort.SliceStable(entries, func(i, j int) bool {
+		iDeprecated := entries[i].Deprecated != 0
+		jDeprecated := entries[j].Deprecated != 0
+		if iDeprecated != jDeprecated {
+			return !iDeprecated
+		}
+		if entries[i].Name != entries[j].Name {
+			return entries[i].Name < entries[j].Name
+		}
+		// Oldest deprecation first, so the order is stable across runs.
 		return entries[i].Deprecated < entries[j].Deprecated
 	})
 }

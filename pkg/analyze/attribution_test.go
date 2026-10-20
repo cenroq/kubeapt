@@ -140,6 +140,7 @@ func TestEnforcerString(t *testing.T) {
 		{analyze.Enforcer{Type: analyze.EnforcerPSA, Name: "restricted:latest"}, "PodSecurity restricted:latest"},
 		{analyze.Enforcer{Type: analyze.EnforcerVAP, Name: "p", Detail: "binding b"}, "ValidatingAdmissionPolicy p (binding b)"},
 		{analyze.Enforcer{Type: analyze.EnforcerLimitRanger}, "LimitRanger"},
+		{analyze.Enforcer{Type: analyze.EnforcerWebhook, Detail: "timeout"}, "Webhook (timeout)"},
 		{analyze.Enforcer{Type: analyze.EnforcerUnattributed, Message: "raw"}, "unattributed"},
 	}
 	for _, tc := range tests {

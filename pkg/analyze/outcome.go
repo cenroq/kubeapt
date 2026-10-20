@@ -60,6 +60,11 @@ const (
 	ReasonKindNotServed Reason = "kind-not-served"
 	// ReasonRequestFailed means the request errored for a transport reason.
 	ReasonRequestFailed Reason = "request-failed"
+	// ReasonUnsupported means the technique cannot be expressed as a dry-run
+	// create, so no request was made. The EphemeralContainer probes are the
+	// only such case today: the violation is applied to a running Pod by
+	// kubectl debug, and the manifest that ships beside them is compliant.
+	ReasonUnsupported Reason = "unsupported"
 )
 
 // Result is one probe's outcome in one namespace.
@@ -187,6 +192,21 @@ func InconclusiveResult(p Probe, namespace string, reason Reason, detail string)
 	}
 }
 
+// UnsupportedResult records a probe that a dry-run create cannot exercise.
+//
+// It is Inconclusive, never a pass: the technique was not tested, and a report
+// that counted it as defended would be claiming something it never measured.
+func UnsupportedResult(p Probe, namespace string) Result {
+	return Result{
+		Probe:     p,
+		Namespace: namespace,
+		Outcome:   OutcomeSkipped,
+		Verdict:   VerdictInconclusive,
+		Reason:    ReasonUnsupported,
+		Detail:    p.Unsupported,
+	}
+}
+
 // ErrorResult records a probe whose request could not be made at all.
 func ErrorResult(p Probe, namespace, detail string) Result {
 	return Result{
@@ -199,10 +219,8 @@ func ErrorResult(p Probe, namespace, detail string) Result {
 	}
 }
 
+// apiMessage extracts the server's own wording from a non-nil request error.
 func apiMessage(err error) string {
-	if err == nil {
-		return ""
-	}
 	var status apierrors.APIStatus
 	if errors.As(err, &status) {
 		if s := status.Status(); s.Message != "" {

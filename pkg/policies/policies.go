@@ -37,7 +37,36 @@ const (
 	AnnotationDisplayName = "security.kubeapt.io/displayName"
 	AnnotationDescription = "security.kubeapt.io/description"
 	AnnotationCategory    = "security.kubeapt.io/category"
+
+	// AnnotationUUID carries the policy's cenroq catalogue identifier. It is
+	// read verbatim; nothing is derived or hashed from it. The same uuid is
+	// stamped on the policy and on the deny manifest that probes it, which is
+	// what lets an analyze result name the policy that should have blocked it.
+	AnnotationUUID = "kubeapt.io/uuid"
 )
+
+// DocsBaseURL is the root of the published policy catalogue.
+const DocsBaseURL = "https://cenroq.com/open-source/policies"
+
+// DocsURL returns the catalogue page for a policy uuid, or "" when unset.
+// There is deliberately no fallback: a policy with no uuid has no page, and
+// linking to a guessed one would be worse than linking to nothing.
+func DocsURL(uuid string) string {
+	uuid = strings.TrimSpace(uuid)
+	if uuid == "" {
+		return ""
+	}
+	return DocsBaseURL + "/" + uuid
+}
+
+// DocsURLFromAnnotations reads AnnotationUUID off a metadata.annotations map
+// and returns its catalogue page, or "" when the annotation is absent.
+func DocsURLFromAnnotations(meta map[string]string) string {
+	if meta == nil {
+		return ""
+	}
+	return DocsURL(meta[AnnotationUUID])
+}
 
 // Kyverno annotation keys, read as fallbacks by the accessors below and written
 // alongside their security.kubeapt.io equivalents by policy conversion.
@@ -78,6 +107,16 @@ func (p *Policy) Description() string {
 // Category returns the policy's category, or "" if unset.
 func (p *Policy) Category() string {
 	return p.lookupAnnotation(AnnotationCategory, KyvernoAnnotationCategory)
+}
+
+// UUID returns the policy's catalogue identifier, or "" if unset.
+func (p *Policy) UUID() string {
+	return p.lookupAnnotation(AnnotationUUID)
+}
+
+// DocsURL returns the policy's catalogue page, or "" if it carries no uuid.
+func (p *Policy) DocsURL() string {
+	return DocsURL(p.UUID())
 }
 
 // lookupAnnotation returns the first non-empty annotation value, or "".

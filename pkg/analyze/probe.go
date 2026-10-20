@@ -38,6 +38,11 @@ const (
 	AnnotationProbeExpect = "analyze.kubeapt.io/expect"
 )
 
+// AnnotationUUID is the catalogue identifier a deny manifest shares with the
+// policy that should reject it. It is the only kubeapt annotation the shipped
+// probe corpus carries, so it is how a result names its policy.
+const AnnotationUUID = policies.AnnotationUUID
+
 // Expectation records what a correctly configured cluster should do with a probe.
 type Expectation string
 
@@ -60,6 +65,21 @@ type Probe struct {
 	Severity    types.Severity
 	Expect      Expectation
 	SourceFile  string
+
+	// UUID is the catalogue identifier shared with the policy this probe
+	// tests, read from kubeapt.io/uuid. Empty for probe sets that do not
+	// stamp one.
+	UUID string
+
+	// Policy is the policy this probe's uuid resolves to, when the caller
+	// supplied an index to resolve it against. Probe manifests carry only
+	// the uuid, so display metadata comes from the policy, not the probe.
+	Policy *PolicyRef
+
+	// Unsupported, when set, explains why this probe cannot be exercised by a
+	// dry-run create. Such a probe is still reported -- as Skipped, never as a
+	// pass -- because an untested technique is not a defended one.
+	Unsupported string
 
 	// Object is the manifest to submit, with kubeapt's own annotations
 	// removed. It is a deep copy, so building a Probe never mutates the
@@ -104,8 +124,39 @@ func NewProbe(obj *unstructured.Unstructured, sourceFile string) (Probe, error) 
 		Severity:   policies.NormalizeSeverity(annotations[policies.AnnotationSeverity]),
 		Expect:     expect,
 		SourceFile: sourceFile,
+		UUID:       strings.TrimSpace(annotations[AnnotationUUID]),
 		Object:     sanitised,
 	}, nil
+}
+
+// DocsURL returns the catalogue page for the policy this probe tests, or ""
+// when the probe carries no uuid.
+func (p Probe) DocsURL() string { return policies.DocsURL(p.UUID) }
+
+// Title returns the best available human label for the probe: the policy's
+// display name when the uuid resolved, else the probe's own.
+//
+// The policy wins because a shipped deny manifest carries no descriptive
+// annotations at all, so Probe.DisplayName has already fallen back to
+// "Kind name" -- a label that names the fixture rather than the weakness it
+// tests.
+func (p Probe) Title() string {
+	if p.Policy != nil && p.Policy.DisplayName != "" {
+		return p.Policy.DisplayName
+	}
+	return p.DisplayName
+}
+
+// Summary returns the best available description: the probe's own when it has
+// one, else the policy's. Same reasoning as Title.
+func (p Probe) Summary() string {
+	if p.Description != "" {
+		return p.Description
+	}
+	if p.Policy != nil {
+		return p.Policy.Description
+	}
+	return ""
 }
 
 // parseExpectation rejects an unrecognised value rather than defaulting it. A
@@ -175,7 +226,16 @@ func stripProbeAnnotations(obj *unstructured.Unstructured) {
 	obj.SetAnnotations(remaining)
 }
 
+// isProbeAnnotation reports whether a key is kubeapt's own bookkeeping rather
+// than part of the object under test.
+//
+// The prefixes are deliberately narrow. Probes in the shipped corpus violate
+// their policy *through* annotations -- an apparmor probe carries
+// container.apparmor.security.beta.kubernetes.io/main and an ingress probe
+// carries nginx.ingress.kubernetes.io/server-snippet -- so stripping anything
+// broader would send a compliant object and report a false pass.
 func isProbeAnnotation(key string) bool {
 	return strings.HasPrefix(key, "analyze.kubeapt.io/") ||
-		strings.HasPrefix(key, "security.kubeapt.io/")
+		strings.HasPrefix(key, "security.kubeapt.io/") ||
+		strings.HasPrefix(key, "kubeapt.io/")
 }
