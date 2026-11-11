@@ -38,34 +38,54 @@ const (
 	AnnotationDescription = "security.kubeapt.io/description"
 	AnnotationCategory    = "security.kubeapt.io/category"
 
-	// AnnotationUUID carries the policy's cenroq catalogue identifier. It is
-	// read verbatim; nothing is derived or hashed from it. The same uuid is
-	// stamped on the policy and on the deny manifest that probes it, which is
-	// what lets an analyze result name the policy that should have blocked it.
+	// AnnotationFinding carries the policy's cenroq finding id, such as
+	// "oq-0276". It is read verbatim; nothing is derived or hashed from it. The
+	// same id is stamped on the policy and on the deny manifest that probes it,
+	// which is what lets an analyze result name the policy that should have
+	// blocked it.
+	AnnotationFinding = "cenroq.io/finding"
+
+	// AnnotationUUID is the catalogue identifier policy sets stamped before
+	// finding ids existed.
+	//
+	// Deprecated: read only as a fallback for AnnotationFinding. Future policy
+	// sets carry AnnotationFinding alone.
 	AnnotationUUID = "kubeapt.io/uuid"
 )
+
+// FindingID returns the trimmed finding id from a metadata.annotations map:
+// AnnotationFinding when set, else the deprecated AnnotationUUID. deprecated
+// reports that the fallback supplied the id, so a caller can warn that the
+// policy set needs re-publishing. A nil map yields "".
+func FindingID(annotations map[string]string) (id string, deprecated bool) {
+	if id := strings.TrimSpace(annotations[AnnotationFinding]); id != "" {
+		return id, false
+	}
+	if id := strings.TrimSpace(annotations[AnnotationUUID]); id != "" {
+		return id, true
+	}
+	return "", false
+}
 
 // DocsBaseURL is the root of the published policy catalogue.
 const DocsBaseURL = "https://cenroq.com/open-source/policies"
 
-// DocsURL returns the catalogue page for a policy uuid, or "" when unset.
-// There is deliberately no fallback: a policy with no uuid has no page, and
+// DocsURL returns the catalogue page for a finding id, or "" when unset.
+// There is deliberately no fallback: a policy with no id has no page, and
 // linking to a guessed one would be worse than linking to nothing.
-func DocsURL(uuid string) string {
-	uuid = strings.TrimSpace(uuid)
-	if uuid == "" {
+func DocsURL(findingID string) string {
+	findingID = strings.TrimSpace(findingID)
+	if findingID == "" {
 		return ""
 	}
-	return DocsBaseURL + "/" + uuid
+	return DocsBaseURL + "/" + findingID
 }
 
-// DocsURLFromAnnotations reads AnnotationUUID off a metadata.annotations map
-// and returns its catalogue page, or "" when the annotation is absent.
+// DocsURLFromAnnotations resolves a metadata.annotations map to its catalogue
+// page via FindingID, or "" when the map carries no id.
 func DocsURLFromAnnotations(meta map[string]string) string {
-	if meta == nil {
-		return ""
-	}
-	return DocsURL(meta[AnnotationUUID])
+	id, _ := FindingID(meta)
+	return DocsURL(id)
 }
 
 // Kyverno annotation keys, read as fallbacks by the accessors below and written
@@ -109,14 +129,15 @@ func (p *Policy) Category() string {
 	return p.lookupAnnotation(AnnotationCategory, KyvernoAnnotationCategory)
 }
 
-// UUID returns the policy's catalogue identifier, or "" if unset.
-func (p *Policy) UUID() string {
-	return p.lookupAnnotation(AnnotationUUID)
+// FindingID returns the policy's finding id, falling back to the deprecated
+// AnnotationUUID, or "" if neither is set.
+func (p *Policy) FindingID() string {
+	return p.lookupAnnotation(AnnotationFinding, AnnotationUUID)
 }
 
-// DocsURL returns the policy's catalogue page, or "" if it carries no uuid.
+// DocsURL returns the policy's catalogue page, or "" if it carries no id.
 func (p *Policy) DocsURL() string {
-	return DocsURL(p.UUID())
+	return DocsURL(p.FindingID())
 }
 
 // lookupAnnotation returns the first non-empty annotation value, or "".

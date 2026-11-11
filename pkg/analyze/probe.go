@@ -38,10 +38,10 @@ const (
 	AnnotationProbeExpect = "analyze.kubeapt.io/expect"
 )
 
-// AnnotationUUID is the catalogue identifier a deny manifest shares with the
-// policy that should reject it. It is the only kubeapt annotation the shipped
-// probe corpus carries, so it is how a result names its policy.
-const AnnotationUUID = policies.AnnotationUUID
+// AnnotationFinding is the finding id a deny manifest shares with the policy
+// that should reject it. It is the only cenroq annotation the shipped probe
+// corpus carries, so it is how a result names its policy.
+const AnnotationFinding = policies.AnnotationFinding
 
 // Expectation records what a correctly configured cluster should do with a probe.
 type Expectation string
@@ -66,14 +66,18 @@ type Probe struct {
 	Expect      Expectation
 	SourceFile  string
 
-	// UUID is the catalogue identifier shared with the policy this probe
-	// tests, read from kubeapt.io/uuid. Empty for probe sets that do not
-	// stamp one.
-	UUID string
+	// FindingID is the finding id shared with the policy this probe tests,
+	// such as "oq-0276", read from cenroq.io/finding. Empty for probe sets
+	// that do not stamp one.
+	FindingID string
 
-	// Policy is the policy this probe's uuid resolves to, when the caller
-	// supplied an index to resolve it against. Probe manifests carry only
-	// the uuid, so display metadata comes from the policy, not the probe.
+	// DeprecatedID reports that FindingID was read from the deprecated
+	// kubeapt.io/uuid annotation, which future policy sets no longer carry.
+	DeprecatedID bool
+
+	// Policy is the policy this probe's finding id resolves to, when the
+	// caller supplied an index to resolve it against. Probe manifests carry
+	// only the id, so display metadata comes from the policy, not the probe.
 	Policy *PolicyRef
 
 	// Unsupported, when set, explains why this probe cannot be exercised by a
@@ -111,6 +115,8 @@ func NewProbe(obj *unstructured.Unstructured, sourceFile string) (Probe, error) 
 	sanitised := obj.DeepCopy()
 	stripProbeAnnotations(sanitised)
 
+	findingID, deprecatedID := policies.FindingID(annotations)
+
 	return Probe{
 		ID:          probeID(annotations[AnnotationProbeID], sourceFile, obj),
 		DisplayName: displayName(annotations, obj),
@@ -121,20 +127,21 @@ func NewProbe(obj *unstructured.Unstructured, sourceFile string) (Probe, error) 
 		// know, so accepting the Kyverno key here would quietly report a
 		// medium-severity probe as Not Rated. Title, description and category
 		// are plain strings with no such mismatch, so they do fall back.
-		Severity:   policies.NormalizeSeverity(annotations[policies.AnnotationSeverity]),
-		Expect:     expect,
-		SourceFile: sourceFile,
-		UUID:       strings.TrimSpace(annotations[AnnotationUUID]),
-		Object:     sanitised,
+		Severity:     policies.NormalizeSeverity(annotations[policies.AnnotationSeverity]),
+		Expect:       expect,
+		SourceFile:   sourceFile,
+		FindingID:    findingID,
+		DeprecatedID: deprecatedID,
+		Object:       sanitised,
 	}, nil
 }
 
 // DocsURL returns the catalogue page for the policy this probe tests, or ""
-// when the probe carries no uuid.
-func (p Probe) DocsURL() string { return policies.DocsURL(p.UUID) }
+// when the probe carries no finding id.
+func (p Probe) DocsURL() string { return policies.DocsURL(p.FindingID) }
 
 // Title returns the best available human label for the probe: the policy's
-// display name when the uuid resolved, else the probe's own.
+// display name when the finding id resolved, else the probe's own.
 //
 // The policy wins because a shipped deny manifest carries no descriptive
 // annotations at all, so Probe.DisplayName has already fallen back to
@@ -226,16 +233,18 @@ func stripProbeAnnotations(obj *unstructured.Unstructured) {
 	obj.SetAnnotations(remaining)
 }
 
-// isProbeAnnotation reports whether a key is kubeapt's own bookkeeping rather
-// than part of the object under test.
+// isProbeAnnotation reports whether a key is kubeapt's or cenroq's own
+// bookkeeping rather than part of the object under test.
 //
-// The prefixes are deliberately narrow. Probes in the shipped corpus violate
+// The matches are deliberately narrow, which is why cenroq.io/finding is
+// matched exactly rather than by its cenroq.io/ prefix. Probes in the shipped corpus violate
 // their policy *through* annotations -- an apparmor probe carries
 // container.apparmor.security.beta.kubernetes.io/main and an ingress probe
 // carries nginx.ingress.kubernetes.io/server-snippet -- so stripping anything
 // broader would send a compliant object and report a false pass.
 func isProbeAnnotation(key string) bool {
-	return strings.HasPrefix(key, "analyze.kubeapt.io/") ||
+	return key == AnnotationFinding ||
+		strings.HasPrefix(key, "analyze.kubeapt.io/") ||
 		strings.HasPrefix(key, "security.kubeapt.io/") ||
 		strings.HasPrefix(key, "kubeapt.io/")
 }

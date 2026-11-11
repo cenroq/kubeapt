@@ -24,6 +24,7 @@ import (
 	"github.com/cenroq/kubeapt/v2/internal/kubernetes"
 	"github.com/cenroq/kubeapt/v2/internal/logging"
 	"github.com/cenroq/kubeapt/v2/pkg/analyze"
+	"github.com/cenroq/kubeapt/v2/pkg/policies"
 )
 
 // defaultProbeBundle is the bundle analyze probes when none is named. Probes
@@ -78,7 +79,9 @@ what the cluster in front of you actually enforces.`,
 			if err := logging.Init("", getLogLevel()); err != nil {
 				return err
 			}
-			logging.SetOutputWriter(cmd.OutOrStdout())
+			// Logs go to stderr and the report to stdout, as in validate and
+			// convert, so a warning can never corrupt -f json output.
+			logging.SetOutputWriter(cmd.ErrOrStderr())
 			logging.SetReportWriter(cmd.OutOrStdout())
 			return nil
 		},
@@ -109,6 +112,7 @@ func runAnalyze(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+	warnDeprecatedIDs(probes)
 	probes, err = filterProbes(probes, request.probeIDs)
 	if err != nil {
 		return err
@@ -263,9 +267,9 @@ func splitCommaList(raw string) []string {
 
 // loadProbes reads the probe corpus from a local path or an installed bundle.
 //
-// A bundle is loaded whole so each probe's uuid resolves against the bundle's
-// own policies.yaml: a deny manifest carries only kubeapt.io/uuid, so the
-// policy name, severity and catalogue link all come from that join.
+// A bundle is loaded whole so each probe's finding id resolves against the
+// bundle's own policies.yaml: a deny manifest carries only cenroq.io/finding, so
+// the policy name, severity and catalogue link all come from that join.
 func loadProbes(request analyzeRequest) ([]analyze.Probe, error) {
 	if request.probesPath != "" {
 		info, err := os.Stat(request.probesPath)
@@ -295,6 +299,22 @@ func loadProbes(request analyzeRequest) ([]analyze.Probe, error) {
 		return nil, fmt.Errorf("bundle %s %s ships no probes/ directory; re-download it to get one", request.bundleName, version)
 	}
 	return analyze.LoadBundle(os.DirFS(root), ".")
+}
+
+// warnDeprecatedIDs logs once, not per probe, when the corpus still identifies
+// its policies by kubeapt.io/uuid. The join still works through the fallback,
+// but future policy sets drop the key, so the bundle needs replacing.
+func warnDeprecatedIDs(probes []analyze.Probe) {
+	deprecated := 0
+	for _, probe := range probes {
+		if probe.DeprecatedID || (probe.Policy != nil && probe.Policy.DeprecatedID) {
+			deprecated++
+		}
+	}
+	if deprecated > 0 {
+		logging.Warnf("%d probe(s) are identified by the deprecated %s annotation; future policy sets use only %s. Re-download the bundle once a newer version is published",
+			deprecated, policies.AnnotationUUID, policies.AnnotationFinding)
+	}
 }
 
 func filterProbes(probes []analyze.Probe, ids []string) ([]analyze.Probe, error) {
@@ -485,7 +505,7 @@ func linkedProbeName(probe analyze.Probe, useColor bool) string {
 }
 
 // policyCell names the policy a probe tests, which a deny manifest carries only
-// as a uuid. An empty cell means the uuid did not resolve against the bundle.
+// as a finding id. A "-" means the id did not resolve against the bundle.
 func policyCell(probe analyze.Probe) string {
 	if probe.Policy == nil {
 		return "-"
@@ -620,7 +640,7 @@ type analyzeJSONResult struct {
 	Description string               `json:"description,omitempty"`
 	Category    string               `json:"category,omitempty"`
 	Policy      string               `json:"policy,omitempty"`
-	UUID        string               `json:"uuid,omitempty"`
+	Finding     string               `json:"finding,omitempty"`
 	URL         string               `json:"url,omitempty"`
 	Severity    string               `json:"severity"`
 	Expect      string               `json:"expect"`
@@ -674,7 +694,7 @@ func buildAnalyzeJSON(results []analyze.Result, summary analyze.Summary) analyze
 			DisplayName: result.Probe.Title(),
 			Description: result.Probe.Summary(),
 			Category:    result.Probe.Category,
-			UUID:        result.Probe.UUID,
+			Finding:     result.Probe.FindingID,
 			URL:         result.Probe.DocsURL(),
 			Severity:    string(result.Probe.Severity),
 			Expect:      string(result.Probe.Expect),

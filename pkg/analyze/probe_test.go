@@ -290,34 +290,60 @@ func TestProbeTitleAndSummaryFallbacks(t *testing.T) {
 
 func TestProbeDocsURL(t *testing.T) {
 	if got := (analyze.Probe{}).DocsURL(); got != "" {
-		t.Errorf("no uuid: DocsURL() = %q, want empty", got)
+		t.Errorf("no finding id: DocsURL() = %q, want empty", got)
 	}
-	if got := (analyze.Probe{UUID: "abc"}).DocsURL(); got != policies.DocsBaseURL+"/abc" {
+	if got := (analyze.Probe{FindingID: "oq-0276"}).DocsURL(); got != policies.DocsBaseURL+"/oq-0276" {
 		t.Errorf("DocsURL() = %q", got)
 	}
 }
 
-func TestNewProbeReadsAndStripsUUID(t *testing.T) {
-	raw := `{"apiVersion":"v1","kind":"Pod","metadata":{"name":"p","annotations":{"kubeapt.io/uuid":"  abc  "}}}`
-	p, err := analyze.NewProbe(object(t, raw), "")
-	if err != nil {
-		t.Fatalf("NewProbe: %v", err)
+// cenroq.io/finding is the id; kubeapt.io/uuid is still read so today's
+// bundles keep their policy join, but it is flagged so the CLI can warn.
+func TestNewProbeReadsFindingID(t *testing.T) {
+	tests := []struct {
+		name           string
+		annotations    string
+		wantID         string
+		wantDeprecated bool
+	}{
+		{"finding", `"cenroq.io/finding":"  oq-0276  "`, "oq-0276", false},
+		{"legacy uuid", `"kubeapt.io/uuid":"23ef68db"`, "23ef68db", true},
+		{"finding wins", `"cenroq.io/finding":"oq-0276","kubeapt.io/uuid":"23ef68db"`, "oq-0276", false},
+		{"blank finding falls back", `"cenroq.io/finding":"  ","kubeapt.io/uuid":"23ef68db"`, "23ef68db", true},
+		{"neither", `"example.com/other":"x"`, "", false},
 	}
-	if p.UUID != "abc" {
-		t.Errorf("UUID = %q, want trimmed abc", p.UUID)
-	}
-	if _, present := p.Object.GetAnnotations()[analyze.AnnotationUUID]; present {
-		t.Error("kubeapt.io/uuid reached the object under test")
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := `{"apiVersion":"v1","kind":"Pod","metadata":{"name":"p","annotations":{` + tc.annotations + `}}}`
+			p, err := analyze.NewProbe(object(t, raw), "")
+			if err != nil {
+				t.Fatalf("NewProbe: %v", err)
+			}
+			if p.FindingID != tc.wantID || p.DeprecatedID != tc.wantDeprecated {
+				t.Errorf("FindingID %q DeprecatedID %v, want %q %v", p.FindingID, p.DeprecatedID, tc.wantID, tc.wantDeprecated)
+			}
+			// Neither id may alter the object under test.
+			annotations := p.Object.GetAnnotations()
+			for _, key := range []string{analyze.AnnotationFinding, policies.AnnotationUUID} {
+				if _, present := annotations[key]; present {
+					t.Errorf("%s reached the object under test", key)
+				}
+			}
+		})
 	}
 }
 
 // Shipped probes violate their policy *through* annotations. Stripping one of
 // those would submit a compliant object and report a false pass, so only
-// kubeapt's own prefixes may go.
+// kubeapt's own prefixes and the exact cenroq.io/finding key may go: other
+// cenroq.io annotations belong to the object under test.
 func TestNewProbeKeepsViolatingAnnotations(t *testing.T) {
 	raw := `{"apiVersion":"v1","kind":"Pod","metadata":{"name":"p","annotations":{
 	  "container.apparmor.security.beta.kubernetes.io/main": "unconfined",
 	  "nginx.ingress.kubernetes.io/server-snippet": "return 200;",
+	  "cenroq.io/owner": "team-a",
+	  "pss.security.cenroq.io/enforce": "restricted",
+	  "cenroq.io/finding": "oq-0276",
 	  "kubeapt.io/uuid": "u",
 	  "analyze.kubeapt.io/id": "i",
 	  "security.kubeapt.io/severity": "High"
@@ -330,6 +356,8 @@ func TestNewProbeKeepsViolatingAnnotations(t *testing.T) {
 	want := map[string]string{
 		"container.apparmor.security.beta.kubernetes.io/main": "unconfined",
 		"nginx.ingress.kubernetes.io/server-snippet":          "return 200;",
+		"cenroq.io/owner":                "team-a",
+		"pss.security.cenroq.io/enforce": "restricted",
 	}
 	if len(got) != len(want) {
 		t.Fatalf("annotations = %v, want %v", got, want)

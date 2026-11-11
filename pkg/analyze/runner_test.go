@@ -112,7 +112,7 @@ func testProbe(id string) Probe {
 		"metadata":   map[string]any{"name": id},
 		"spec":       map[string]any{"hostPID": true},
 	}}
-	return Probe{ID: id, Expect: ExpectBlocked, Object: obj, UUID: testUUID}
+	return Probe{ID: id, Expect: ExpectBlocked, Object: obj, FindingID: testFinding}
 }
 
 func forbidden() error {

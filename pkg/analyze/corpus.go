@@ -43,24 +43,29 @@ const (
 	// neither can be exercised by a dry-run create.
 	DebugFileSuffix = ".debug.yaml"
 	// PoliciesFileName is the bundle's policy set, used to resolve a probe's
-	// uuid to the policy it tests.
+	// finding id to the policy it tests.
 	PoliciesFileName = "policies.yaml"
 )
 
-// PolicyRef is the policy a probe's uuid resolves to. Probe manifests carry
-// only kubeapt.io/uuid, so every human-readable field comes from here.
+// PolicyRef is the policy a probe's finding id resolves to. Probe manifests
+// carry only cenroq.io/finding, so every human-readable field comes from here.
 type PolicyRef struct {
-	UUID        string
-	Name        string
-	DisplayName string
-	Description string
-	Severity    types.Severity
-	URL         string
+	FindingID string
+	// DeprecatedID reports that FindingID was read from the deprecated
+	// kubeapt.io/uuid annotation rather than cenroq.io/finding.
+	DeprecatedID bool
+	Name         string
+	DisplayName  string
+	Description  string
+	Severity     types.Severity
+	URL          string
 }
 
-// LoadPolicyIndex reads a bundle's policies.yaml and indexes it by uuid.
+// LoadPolicyIndex reads a bundle's policies.yaml and indexes it by finding id,
+// read as policies.FindingID does: cenroq.io/finding, else the deprecated
+// kubeapt.io/uuid.
 //
-// Policies without a uuid are skipped rather than rejected: a bundle built
+// Policies without an id are skipped rather than rejected: a bundle built
 // before the catalogue existed is still usable, it just cannot name the policy
 // behind a verdict.
 func LoadPolicyIndex(fsys fs.FS, name string) (map[string]PolicyRef, error) {
@@ -74,27 +79,28 @@ func LoadPolicyIndex(fsys fs.FS, name string) (map[string]PolicyRef, error) {
 		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(doc.object, &policy); err != nil {
 			return nil, fmt.Errorf("analyze: %s doc %d: %w", name, doc.index, err)
 		}
-		uuid := strings.TrimSpace(policy.Annotations[policies.AnnotationUUID])
-		if uuid == "" {
+		id, deprecated := policies.FindingID(policy.Annotations)
+		if id == "" {
 			continue
 		}
-		index[uuid] = PolicyRef{
-			UUID:        uuid,
-			Name:        policy.Name,
-			DisplayName: policies.LookupAnnotation(policy.Annotations, policies.AnnotationDisplayName, policies.KyvernoAnnotationTitle),
-			Description: policies.LookupAnnotation(policy.Annotations, policies.AnnotationDescription, policies.KyvernoAnnotationDescription),
-			Severity:    policies.NormalizeSeverity(policy.Annotations[policies.AnnotationSeverity]),
-			URL:         policies.DocsURL(uuid),
+		index[id] = PolicyRef{
+			FindingID:    id,
+			DeprecatedID: deprecated,
+			Name:         policy.Name,
+			DisplayName:  policies.LookupAnnotation(policy.Annotations, policies.AnnotationDisplayName, policies.KyvernoAnnotationTitle),
+			Description:  policies.LookupAnnotation(policy.Annotations, policies.AnnotationDescription, policies.KyvernoAnnotationDescription),
+			Severity:     policies.NormalizeSeverity(policy.Annotations[policies.AnnotationSeverity]),
+			URL:          policies.DocsURL(id),
 		}
 	}
 	return index, nil
 }
 
-// AttachPolicies resolves each probe's uuid against index, filling in Policy
+// AttachPolicies resolves each probe's finding id against index, filling in Policy
 // and back-filling the severity the probe manifest does not carry.
 func AttachPolicies(probes []Probe, index map[string]PolicyRef) {
 	for i := range probes {
-		ref, ok := index[probes[i].UUID]
+		ref, ok := index[probes[i].FindingID]
 		if !ok {
 			continue
 		}

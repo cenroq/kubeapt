@@ -14,7 +14,7 @@ import (
 	"github.com/cenroq/kubeapt/v2/pkg/types"
 )
 
-const testUUID = "23ef68db-2409-43a1-854d-c46477a533a9"
+const testFinding = "oq-0276"
 
 // bundleDeny mirrors a real probes/deny.yaml: a comment banner, a leading
 // separator, and per-document "# policy:" headers.
@@ -28,7 +28,7 @@ kind: Pod
 metadata:
   name: hostpid-pod
   annotations:
-    kubeapt.io/uuid: "` + testUUID + `"
+    cenroq.io/finding: "` + testFinding + `"
 spec:
   hostPID: true
 ---
@@ -38,7 +38,7 @@ kind: Pod
 metadata:
   name: hostipc-pod
   annotations:
-    kubeapt.io/uuid: "aaaaaaaa-0000-0000-0000-000000000000"
+    cenroq.io/finding: "oq-0001"
 spec:
   hostIPC: true
 `
@@ -48,7 +48,7 @@ kind: ValidatingAdmissionPolicy
 metadata:
   name: pod-hostpid
   annotations:
-    kubeapt.io/uuid: "` + testUUID + `"
+    cenroq.io/finding: "` + testFinding + `"
     security.kubeapt.io/displayName: "Shares the Host PID Namespace"
     security.kubeapt.io/description: "Exposes every process on the node."
     security.kubeapt.io/severity: "High"
@@ -80,13 +80,13 @@ func TestLoadProbesMergedDenyFile(t *testing.T) {
 		if probe.Expect != ExpectBlocked {
 			t.Errorf("%s expect = %q, want blocked", probe.ID, probe.Expect)
 		}
-		if probe.UUID == "" {
-			t.Errorf("%s carries no uuid", probe.ID)
+		if probe.FindingID == "" {
+			t.Errorf("%s carries no finding id", probe.ID)
 		}
-		// The uuid identifies the probe to kubeapt; it must not alter the
+		// The finding id identifies the probe to kubeapt; it must not alter the
 		// object under test.
-		if _, present := probe.Object.GetAnnotations()[AnnotationUUID]; present {
-			t.Errorf("%s still carries the uuid annotation", probe.ID)
+		if _, present := probe.Object.GetAnnotations()[AnnotationFinding]; present {
+			t.Errorf("%s still carries the finding annotation", probe.ID)
 		}
 	}
 }
@@ -98,12 +98,12 @@ func TestLoadBundleJoinsPolicyMetadata(t *testing.T) {
 	}
 	var matched *Probe
 	for i := range probes {
-		if probes[i].UUID == testUUID {
+		if probes[i].FindingID == testFinding {
 			matched = &probes[i]
 		}
 	}
 	if matched == nil {
-		t.Fatal("probe with the policy uuid was not loaded")
+		t.Fatal("probe with the policy finding id was not loaded")
 	}
 	if matched.Policy == nil {
 		t.Fatal("policy was not joined")
@@ -127,14 +127,14 @@ func TestLoadBundleJoinsPolicyMetadata(t *testing.T) {
 	if matched.Severity != types.SeverityHigh {
 		t.Errorf("severity = %q, want High", matched.Severity)
 	}
-	if want := policies.DocsURL(testUUID); matched.DocsURL() != want {
+	if want := policies.DocsURL(testFinding); matched.DocsURL() != want {
 		t.Errorf("docs url = %q, want %q", matched.DocsURL(), want)
 	}
 
-	// The probe whose uuid is not in policies.yaml stays unresolved rather
+	// The probe whose finding id is not in policies.yaml stays unresolved rather
 	// than borrowing another policy's metadata.
 	for i := range probes {
-		if probes[i].UUID != testUUID && probes[i].Policy != nil {
+		if probes[i].FindingID != testFinding && probes[i].Policy != nil {
 			t.Errorf("%s resolved to a policy it does not belong to", probes[i].ID)
 		}
 	}
@@ -167,7 +167,7 @@ kind: Pod
 metadata:
   name: ephemeral-privileged
   annotations:
-    kubeapt.io/uuid: "` + testUUID + `"
+    cenroq.io/finding: "` + testFinding + `"
 spec:
   containers:
   - name: main
@@ -234,11 +234,11 @@ func TestLoadProbesEmptyDirectory(t *testing.T) {
 
 // A bundle built before the catalogue existed is still runnable; it just
 // cannot name the policy behind a verdict.
-func TestLoadPolicyIndexSkipsPoliciesWithoutUUID(t *testing.T) {
+func TestLoadPolicyIndexSkipsPoliciesWithoutFindingID(t *testing.T) {
 	fsys := fstest.MapFS{"policies.yaml": {Data: []byte(`apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
-  name: no-uuid
+  name: no-finding
   annotations:
     security.kubeapt.io/severity: "High"
 `)}}
@@ -285,7 +285,7 @@ kind: ValidatingAdmissionPolicy
 metadata:
   name: kyverno-style
   annotations:
-    kubeapt.io/uuid: " ` + testUUID + ` "
+    cenroq.io/finding: " ` + testFinding + ` "
     policies.kyverno.io/title: "Disallow Host PID"
     policies.kyverno.io/description: "From Kyverno."
     security.kubeapt.io/severity: "critical"
@@ -295,24 +295,24 @@ metadata:
 		t.Fatalf("LoadPolicyIndex: %v", err)
 	}
 	want := PolicyRef{
-		UUID:        testUUID,
+		FindingID:   testFinding,
 		Name:        "kyverno-style",
 		DisplayName: "Disallow Host PID",
 		Description: "From Kyverno.",
 		Severity:    types.SeverityCritical,
-		URL:         policies.DocsURL(testUUID),
+		URL:         policies.DocsURL(testFinding),
 	}
-	if got := index[testUUID]; got != want {
+	if got := index[testFinding]; got != want {
 		t.Fatalf("ref = %+v\nwant  %+v", got, want)
 	}
 }
 
 func TestAttachPolicies(t *testing.T) {
-	index := map[string]PolicyRef{testUUID: {UUID: testUUID, Name: "pod-hostpid", Severity: types.SeverityHigh}}
+	index := map[string]PolicyRef{testFinding: {FindingID: testFinding, Name: "pod-hostpid", Severity: types.SeverityHigh}}
 	probes := []Probe{
-		{ID: "unrated", UUID: testUUID, Severity: types.SeverityNotRated},
-		{ID: "rated", UUID: testUUID, Severity: types.SeverityLow},
-		{ID: "unknown", UUID: "not-in-index", Severity: types.SeverityNotRated},
+		{ID: "unrated", FindingID: testFinding, Severity: types.SeverityNotRated},
+		{ID: "rated", FindingID: testFinding, Severity: types.SeverityLow},
+		{ID: "unknown", FindingID: "not-in-index", Severity: types.SeverityNotRated},
 	}
 	AttachPolicies(probes, index)
 
@@ -324,7 +324,7 @@ func TestAttachPolicies(t *testing.T) {
 		t.Errorf("explicit severity overwritten: %q", probes[1].Severity)
 	}
 	if probes[2].Policy != nil {
-		t.Errorf("unknown uuid resolved to %+v", probes[2].Policy)
+		t.Errorf("unknown finding id resolved to %+v", probes[2].Policy)
 	}
 	if probes[0].Policy == probes[1].Policy {
 		t.Error("probes share one PolicyRef; mutating one would change the other")
@@ -551,5 +551,60 @@ func TestIsManifestName(t *testing.T) {
 		if got := isManifestName(name); got != want {
 			t.Errorf("isManifestName(%q) = %v", name, got)
 		}
+	}
+}
+
+// A bundle stamped before finding ids existed still joins through the
+// deprecated kubeapt.io/uuid, and both sides say so, so the CLI can warn.
+func TestLoadBundleJoinsLegacyUUIDBundle(t *testing.T) {
+	const legacy = "23ef68db-2409-43a1-854d-c46477a533a9"
+	toLegacy := func(doc string) []byte {
+		return []byte(strings.ReplaceAll(doc, `cenroq.io/finding: "`+testFinding+`"`, `kubeapt.io/uuid: "`+legacy+`"`))
+	}
+	fsys := bundleFS()
+	fsys["policies.yaml"] = &fstest.MapFile{Data: toLegacy(bundlePolicies)}
+	fsys["probes/deny.yaml"] = &fstest.MapFile{Data: toLegacy(bundleDeny)}
+
+	probes, err := LoadBundle(fsys, ".")
+	if err != nil {
+		t.Fatalf("LoadBundle: %v", err)
+	}
+	var joined *Probe
+	for i := range probes {
+		if probes[i].FindingID == legacy {
+			joined = &probes[i]
+		}
+	}
+	if joined == nil || joined.Policy == nil || joined.Policy.Name != "pod-hostpid" {
+		t.Fatalf("legacy bundle did not join: %+v", probes)
+	}
+	if !joined.DeprecatedID || !joined.Policy.DeprecatedID {
+		t.Errorf("DeprecatedID probe %v policy %v, want both true", joined.DeprecatedID, joined.Policy.DeprecatedID)
+	}
+	if want := policies.DocsURL(legacy); joined.DocsURL() != want {
+		t.Errorf("docs url = %q, want %q", joined.DocsURL(), want)
+	}
+}
+
+// A policy carrying both keys is indexed under its finding id, not its uuid.
+func TestLoadPolicyIndexPrefersFindingID(t *testing.T) {
+	fsys := fstest.MapFS{"policies.yaml": {Data: []byte(`apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: both
+  annotations:
+    cenroq.io/finding: "` + testFinding + `"
+    kubeapt.io/uuid: "23ef68db-2409-43a1-854d-c46477a533a9"
+`)}}
+	index, err := LoadPolicyIndex(fsys, "policies.yaml")
+	if err != nil {
+		t.Fatalf("LoadPolicyIndex: %v", err)
+	}
+	ref, ok := index[testFinding]
+	if len(index) != 1 || !ok {
+		t.Fatalf("index = %v, want one entry keyed by %s", index, testFinding)
+	}
+	if ref.DeprecatedID {
+		t.Error("an id read from cenroq.io/finding was flagged deprecated")
 	}
 }

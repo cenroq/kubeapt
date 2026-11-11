@@ -177,8 +177,8 @@ func (c *fakeCluster) serveCreate(w http.ResponseWriter, r *http.Request, namesp
 	}
 	annotations, _ := metadata["annotations"].(map[string]any)
 	for key := range annotations {
-		if strings.Contains(key, "kubeapt.io/") {
-			c.t.Errorf("%s: kubeapt annotation %q reached the API server", name, key)
+		if strings.Contains(key, "kubeapt.io/") || key == policies.AnnotationFinding {
+			c.t.Errorf("%s: bookkeeping annotation %q reached the API server", name, key)
 		}
 	}
 
@@ -259,14 +259,15 @@ func isolateCluster(t *testing.T, kubeconfig string) string {
 	return home
 }
 
-// runAnalyzeCmd executes a fresh analyze command and returns what it wrote.
-func runAnalyzeCmd(t *testing.T, out io.Writer, args ...string) error {
+// runAnalyzeCmd executes a fresh analyze command. The report goes to stdout and
+// log lines to stderr, so a JSON report can be parsed without them.
+func runAnalyzeCmd(t *testing.T, stdout, stderr io.Writer, args ...string) error {
 	t.Helper()
 	cmd := AnalyzeCmd()
 	cmd.SilenceUsage = true
 	cmd.SilenceErrors = true
-	cmd.SetOut(out)
-	cmd.SetErr(out)
+	cmd.SetOut(stdout)
+	cmd.SetErr(stderr)
 	// Never nil: cobra would fall back to os.Args, which holds go test's flags.
 	cmd.SetArgs(append([]string{}, args...))
 	return cmd.Execute()
@@ -279,15 +280,23 @@ type analyzeEnvelope struct {
 
 func runAnalyzeJSON(t *testing.T, args ...string) (analyzeEnvelope, error) {
 	t.Helper()
-	var buf bytes.Buffer
-	err := runAnalyzeCmd(t, &buf, append([]string{"-f", "json"}, args...)...)
+	envelope, _, err := runAnalyzeJSONWithLog(t, args...)
+	return envelope, err
+}
+
+// runAnalyzeJSONWithLog also returns what was logged to stderr. stdout must
+// hold nothing but the JSON envelope.
+func runAnalyzeJSONWithLog(t *testing.T, args ...string) (analyzeEnvelope, string, error) {
+	t.Helper()
+	var stdout, stderr bytes.Buffer
+	err := runAnalyzeCmd(t, &stdout, &stderr, append([]string{"-f", "json"}, args...)...)
 	var envelope analyzeEnvelope
-	if buf.Len() > 0 {
-		if decodeErr := json.Unmarshal(buf.Bytes(), &envelope); decodeErr != nil {
-			t.Fatalf("output is not a JSON envelope (%v):\n%s", decodeErr, buf.String())
+	if stdout.Len() > 0 {
+		if decodeErr := json.Unmarshal(stdout.Bytes(), &envelope); decodeErr != nil {
+			t.Fatalf("stdout is not a JSON envelope (%v):\n%s", decodeErr, stdout.String())
 		}
 	}
-	return envelope, err
+	return envelope, stderr.String(), err
 }
 
 // byProbe indexes results as "probe@namespace".
@@ -430,7 +439,7 @@ func TestAnalyzeDefaultsToContextNamespace(t *testing.T) {
 }
 
 // Without --probes analyze runs the installed default bundle, and each probe's
-// uuid resolves to the policy it tests.
+// finding id resolves to the policy it tests.
 func TestAnalyzeRunsInstalledDefaultBundle(t *testing.T) {
 	cluster := newFakeCluster(t)
 	home := isolateCluster(t, cluster.kubeconfig(""))
@@ -453,8 +462,8 @@ func TestAnalyzeRunsInstalledDefaultBundle(t *testing.T) {
 		t.Fatalf("results = %+v", envelope.Results.Results)
 	}
 	got := envelope.Results.Results[0]
-	if got.Policy != "pod-hostpid" || got.UUID != bundleProbeUUID || got.URL != policies.DocsURL(bundleProbeUUID) {
-		t.Errorf("policy join = %q %q %q", got.Policy, got.UUID, got.URL)
+	if got.Policy != "pod-hostpid" || got.Finding != bundleFinding || got.URL != policies.DocsURL(bundleFinding) {
+		t.Errorf("policy join = %q %q %q", got.Policy, got.Finding, got.URL)
 	}
 	if got.DisplayName != "Shares the Host PID Namespace" || got.Severity != "High" {
 		t.Errorf("display = %q severity = %q", got.DisplayName, got.Severity)
@@ -475,8 +484,8 @@ func TestAnalyzeWritesReportFile(t *testing.T) {
 	})
 	report := filepath.Join(t.TempDir(), "report.txt")
 
-	var stdout bytes.Buffer
-	if err := runAnalyzeCmd(t, &stdout, "--probes", dir, "--namespaces", "a", "--output", report, "--report", "all"); err != nil {
+	var stdout, stderr bytes.Buffer
+	if err := runAnalyzeCmd(t, &stdout, &stderr, "--probes", dir, "--namespaces", "a", "--output", report, "--report", "all"); err != nil {
 		t.Fatalf("analyze: %v", err)
 	}
 	data, err := os.ReadFile(report)
@@ -484,7 +493,7 @@ func TestAnalyzeWritesReportFile(t *testing.T) {
 		t.Fatalf("read report: %v", err)
 	}
 	out := string(data)
-	for _, want := range []string{"Admission probe results", "POLICY", "DETAIL", "Shares the Host PID Namespace", "Policy details", policies.DocsURL(bundleProbeUUID)} {
+	for _, want := range []string{"Admission probe results", "POLICY", "DETAIL", "Shares the Host PID Namespace", "Policy details", policies.DocsURL(bundleFinding)} {
 		if !strings.Contains(out, want) {
 			t.Errorf("report missing %q:\n%s", want, out)
 		}
@@ -492,8 +501,9 @@ func TestAnalyzeWritesReportFile(t *testing.T) {
 	if strings.Contains(out, "\x1b") {
 		t.Errorf("escape codes in a report file:\n%q", out)
 	}
-	if !strings.Contains(stdout.String(), "1 dangerous object(s) were admitted") {
-		t.Errorf("summary log missing from stdout:\n%s", stdout.String())
+	// Log lines go to stderr, as in validate and convert.
+	if !strings.Contains(stderr.String(), "1 dangerous object(s) were admitted") {
+		t.Errorf("summary log missing from stderr:\n%s", stderr.String())
 	}
 }
 
@@ -601,7 +611,7 @@ func TestAnalyzeErrors(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			isolateCluster(t, tc.kubeconfig)
-			err := runAnalyzeCmd(t, io.Discard, tc.args...)
+			err := runAnalyzeCmd(t, io.Discard, io.Discard, tc.args...)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("err = %v, want %q", err, tc.want)
 			}
@@ -610,11 +620,61 @@ func TestAnalyzeErrors(t *testing.T) {
 
 	t.Run("failing stdout", func(t *testing.T) {
 		isolateCluster(t, cluster.kubeconfig(""))
-		err := runAnalyzeCmd(t, failingWriter{}, "--probes", dir, "--namespaces", "a", "-f", "json")
+		err := runAnalyzeCmd(t, failingWriter{}, io.Discard, "--probes", dir, "--namespaces", "a", "-f", "json")
 		if err == nil || !strings.Contains(err.Error(), "stdout closed") {
 			t.Fatalf("err = %v, want the write error", err)
 		}
 	})
+}
+
+// Today's bundles still stamp kubeapt.io/uuid. They keep their policy join, and
+// the run says once -- on stderr, so -f json stays parseable -- that future
+// policy sets drop the key.
+func TestAnalyzeWarnsAboutLegacyUUIDBundle(t *testing.T) {
+	const legacy = "23ef68db-2409-43a1-854d-c46477a533a9"
+	toLegacy := func(doc string) string {
+		return strings.ReplaceAll(doc, `cenroq.io/finding: "`+bundleFinding+`"`, `kubeapt.io/uuid: "`+legacy+`"`)
+	}
+	cluster := newFakeCluster(t)
+	isolateCluster(t, cluster.kubeconfig(""))
+
+	tests := []struct {
+		name     string
+		policies string
+		deny     string
+		wantID   string
+		wantWarn bool
+	}{
+		{"legacy uuid bundle", toLegacy(bundlePolicyYAML), toLegacy(bundleDenyYAML), legacy, true},
+		{"finding bundle", bundlePolicyYAML, bundleDenyYAML, bundleFinding, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := writeProbeDir(t, map[string]string{"policies.yaml": tc.policies, "probes/deny.yaml": tc.deny})
+
+			envelope, stderr, err := runAnalyzeJSONWithLog(t, "--probes", dir, "--namespaces", "a")
+			if err != nil {
+				t.Fatalf("analyze: %v", err)
+			}
+			if got := strings.Count(stderr, "deprecated kubeapt.io/uuid"); got != btoi(tc.wantWarn) {
+				t.Fatalf("deprecation warnings = %d, want %d; stderr:\n%s", got, btoi(tc.wantWarn), stderr)
+			}
+			if tc.wantWarn && !strings.Contains(stderr, "1 probe(s)") {
+				t.Errorf("warning does not count the probes:\n%s", stderr)
+			}
+			got := envelope.Results.Results[0]
+			if got.Finding != tc.wantID || got.Policy != "pod-hostpid" || got.URL != policies.DocsURL(tc.wantID) {
+				t.Errorf("finding %q policy %q url %q", got.Finding, got.Policy, got.URL)
+			}
+		})
+	}
+}
+
+func btoi(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 func keys(m map[string]analyzeJSONResult) []string {

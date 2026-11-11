@@ -69,14 +69,14 @@ func writeProbeDir(t *testing.T, files map[string]string) string {
 	return dir
 }
 
-const bundleProbeUUID = "23ef68db-2409-43a1-854d-c46477a533a9"
+const bundleFinding = "oq-0276"
 
 const bundlePolicyYAML = `apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
   name: pod-hostpid
   annotations:
-    kubeapt.io/uuid: "` + bundleProbeUUID + `"
+    cenroq.io/finding: "` + bundleFinding + `"
     security.kubeapt.io/displayName: "Shares the Host PID Namespace"
     security.kubeapt.io/severity: "High"
 `
@@ -91,7 +91,7 @@ kind: Pod
 metadata:
   name: hostpid-pod
   annotations:
-    kubeapt.io/uuid: "` + bundleProbeUUID + `"
+    cenroq.io/finding: "` + bundleFinding + `"
 spec:
   hostPID: true
   containers:
@@ -337,7 +337,7 @@ func TestLoadProbesRejectsBundleWithoutProbes(t *testing.T) {
 	}
 }
 
-// A bundle is loaded whole so each probe's uuid resolves against the bundle's
+// A bundle is loaded whole so each probe's finding id resolves against the bundle's
 // own policies.yaml.
 func TestLoadProbesFromBundleJoinsPolicies(t *testing.T) {
 	home := t.TempDir()
@@ -362,8 +362,8 @@ func TestLoadProbesFromBundleJoinsPolicies(t *testing.T) {
 		t.Fatalf("loaded %d probes, want 1", len(probes))
 	}
 	probe := probes[0]
-	if probe.UUID != bundleProbeUUID {
-		t.Fatalf("uuid = %q", probe.UUID)
+	if probe.FindingID != bundleFinding {
+		t.Fatalf("finding id = %q", probe.FindingID)
 	}
 	if probe.Policy == nil || probe.Policy.Name != "pod-hostpid" {
 		t.Fatalf("policy not joined: %+v", probe.Policy)
@@ -372,12 +372,12 @@ func TestLoadProbesFromBundleJoinsPolicies(t *testing.T) {
 	if probe.Severity != types.SeverityHigh {
 		t.Errorf("severity = %q, want High", probe.Severity)
 	}
-	if want := policies.DocsBaseURL + "/" + bundleProbeUUID; probe.DocsURL() != want {
+	if want := policies.DocsBaseURL + "/" + bundleFinding; probe.DocsURL() != want {
 		t.Errorf("docs url = %q, want %q", probe.DocsURL(), want)
 	}
-	// kubeapt.io/uuid must not reach the API server.
-	if _, present := probe.Object.GetAnnotations()[policies.AnnotationUUID]; present {
-		t.Error("uuid annotation was not stripped from the submitted object")
+	// cenroq.io/finding must not reach the API server.
+	if _, present := probe.Object.GetAnnotations()[policies.AnnotationFinding]; present {
+		t.Error("finding annotation was not stripped from the submitted object")
 	}
 }
 
@@ -660,15 +660,15 @@ func TestPolicyCell(t *testing.T) {
 // The OSC 8 escape is only emitted when colour is on: unlike fatih/color it
 // does not disable itself on a non-TTY and would litter a report file.
 func TestLinkedProbeName(t *testing.T) {
-	linked := analyze.Probe{ID: "hostpid", UUID: bundleProbeUUID}
+	linked := analyze.Probe{ID: "hostpid", FindingID: bundleFinding}
 	if got := linkedProbeName(linked, false); got != "hostpid" {
 		t.Errorf("without color = %q", got)
 	}
 	if got := linkedProbeName(analyze.Probe{ID: "hostpid"}, true); got != "hostpid" {
-		t.Errorf("without uuid = %q", got)
+		t.Errorf("without finding id = %q", got)
 	}
 	got := linkedProbeName(linked, true)
-	if !strings.Contains(got, "\x1b]8;;"+policies.DocsURL(bundleProbeUUID)) || !strings.Contains(got, "hostpid") {
+	if !strings.Contains(got, "\x1b]8;;"+policies.DocsURL(bundleFinding)) || !strings.Contains(got, "hostpid") {
 		t.Errorf("hyperlink = %q", got)
 	}
 }
@@ -706,36 +706,36 @@ func TestDetailCellFallsBackToDetail(t *testing.T) {
 	}
 }
 
-func linkResult(id, uuid string, verdict analyze.Verdict) analyze.Result {
-	return analyze.Result{Probe: analyze.Probe{ID: id, UUID: uuid}, Verdict: verdict}
+func linkResult(id, findingID string, verdict analyze.Verdict) analyze.Result {
+	return analyze.Result{Probe: analyze.Probe{ID: id, FindingID: findingID}, Verdict: verdict}
 }
 
 func TestPrintProbeLinks(t *testing.T) {
 	var buf bytes.Buffer
 	printProbeLinks([]analyze.Result{
-		linkResult("passed", "u-pass", analyze.VerdictPass),
-		linkResult("no-uuid", "", analyze.VerdictFail),
-		linkResult("failed", "u-fail", analyze.VerdictFail),
-		linkResult("failed-again", "u-fail", analyze.VerdictFail),
-		linkResult("warned", "u-warn", analyze.VerdictWarn),
+		linkResult("passed", "oq-0100", analyze.VerdictPass),
+		linkResult("no-finding", "", analyze.VerdictFail),
+		linkResult("failed", "oq-0101", analyze.VerdictFail),
+		linkResult("failed-again", "oq-0101", analyze.VerdictFail),
+		linkResult("warned", "oq-0102", analyze.VerdictWarn),
 	}, &buf)
 	out := buf.String()
 
 	if !strings.HasPrefix(out, "Policy details\n") {
 		t.Fatalf("missing header:\n%s", out)
 	}
-	for _, want := range []string{policies.DocsURL("u-fail"), policies.DocsURL("u-warn")} {
+	for _, want := range []string{policies.DocsURL("oq-0101"), policies.DocsURL("oq-0102")} {
 		if strings.Count(out, want) != 1 {
 			t.Errorf("want %s listed exactly once:\n%s", want, out)
 		}
 	}
 	// A pass needs no explanation, and the reader is pointed at a policy only once.
-	if strings.Contains(out, "u-pass") || strings.Contains(out, "failed-again") {
+	if strings.Contains(out, "oq-0100") || strings.Contains(out, "failed-again") {
 		t.Errorf("pass or duplicate listed:\n%s", out)
 	}
 
 	buf.Reset()
-	printProbeLinks([]analyze.Result{linkResult("passed", "u", analyze.VerdictPass)}, &buf)
+	printProbeLinks([]analyze.Result{linkResult("passed", "oq-0103", analyze.VerdictPass)}, &buf)
 	if buf.Len() != 0 {
 		t.Errorf("nothing to link should print nothing, got %q", buf.String())
 	}
@@ -746,7 +746,7 @@ func TestPrintProbeLinks(t *testing.T) {
 func TestPrintProbeLinksCapsTheList(t *testing.T) {
 	var results []analyze.Result
 	for i := 0; i < maxProbeLinks+5; i++ {
-		results = append(results, linkResult(fmt.Sprintf("p%02d", i), fmt.Sprintf("u%02d", i), analyze.VerdictFail))
+		results = append(results, linkResult(fmt.Sprintf("p%02d", i), fmt.Sprintf("oq-%04d", i), analyze.VerdictFail))
 	}
 	var buf bytes.Buffer
 	printProbeLinks(results, &buf)
@@ -800,7 +800,7 @@ func captureLog(t *testing.T) *bytes.Buffer {
 func TestRenderAnalyzeTableWarnsAboutInconclusive(t *testing.T) {
 	log := captureLog(t)
 	results := []analyze.Result{
-		analyze.InconclusiveResult(analyze.Probe{ID: "hostpid", UUID: bundleProbeUUID,
+		analyze.InconclusiveResult(analyze.Probe{ID: "hostpid", FindingID: bundleFinding,
 			Policy: &analyze.PolicyRef{Name: "pod-hostpid", DisplayName: "Host PID"}}, "a", analyze.ReasonRBAC, "not permitted"),
 	}
 	var buf bytes.Buffer
@@ -813,7 +813,7 @@ func TestRenderAnalyzeTableWarnsAboutInconclusive(t *testing.T) {
 		t.Errorf("report-all hint missing:\n%s", log.String())
 	}
 	out := buf.String()
-	for _, want := range []string{"POLICY", "Host PID", "Policy details", policies.DocsURL(bundleProbeUUID)} {
+	for _, want := range []string{"POLICY", "Host PID", "Policy details", policies.DocsURL(bundleFinding)} {
 		if !strings.Contains(out, want) {
 			t.Errorf("table missing %q:\n%s", want, out)
 		}
@@ -834,12 +834,12 @@ func TestSortAnalyzeResultsBreaksTiesByID(t *testing.T) {
 	}
 }
 
-// A deny manifest carries only a uuid, so the JSON must carry what the uuid
+// A deny manifest carries only a finding id, so the JSON must carry what the id
 // resolved to: the policy's name, title, description and catalogue link.
 func TestBuildAnalyzeJSONCarriesPolicy(t *testing.T) {
 	results := []analyze.Result{{
 		Probe: analyze.Probe{
-			ID: "hostpid", DisplayName: "Pod hostpid-pod", UUID: bundleProbeUUID,
+			ID: "hostpid", DisplayName: "Pod hostpid-pod", FindingID: bundleFinding,
 			Policy: &analyze.PolicyRef{Name: "pod-hostpid", DisplayName: "Host PID", Description: "Exposes every process."},
 		},
 		Outcome: analyze.OutcomeAdmitted,
@@ -847,8 +847,8 @@ func TestBuildAnalyzeJSONCarriesPolicy(t *testing.T) {
 	}}
 	entry := buildAnalyzeJSON(results, analyze.Summarize(results)).Results[0]
 
-	if entry.Policy != "pod-hostpid" || entry.UUID != bundleProbeUUID || entry.URL != policies.DocsURL(bundleProbeUUID) {
-		t.Errorf("policy fields = %q %q %q", entry.Policy, entry.UUID, entry.URL)
+	if entry.Policy != "pod-hostpid" || entry.Finding != bundleFinding || entry.URL != policies.DocsURL(bundleFinding) {
+		t.Errorf("policy fields = %q %q %q", entry.Policy, entry.Finding, entry.URL)
 	}
 	if entry.DisplayName != "Host PID" || entry.Description != "Exposes every process." {
 		t.Errorf("title/summary = %q / %q", entry.DisplayName, entry.Description)
@@ -870,5 +870,29 @@ func TestLoadProbesFromLocalBundleDirectory(t *testing.T) {
 	}
 	if len(probes) != 1 || probes[0].Policy == nil || probes[0].Policy.Name != "pod-hostpid" {
 		t.Fatalf("probes = %+v", probes)
+	}
+}
+
+// One warning for the whole corpus, counting a probe whether its own id or its
+// policy's came from the deprecated key; a clean corpus logs nothing.
+func TestWarnDeprecatedIDs(t *testing.T) {
+	log := captureLog(t)
+	warnDeprecatedIDs([]analyze.Probe{
+		{ID: "own", DeprecatedID: true},
+		{ID: "policy", Policy: &analyze.PolicyRef{DeprecatedID: true}},
+		{ID: "clean", Policy: &analyze.PolicyRef{}},
+		{ID: "unjoined"},
+	})
+	if got := strings.Count(log.String(), "deprecated kubeapt.io/uuid"); got != 1 {
+		t.Fatalf("warnings = %d, want 1:\n%s", got, log.String())
+	}
+	if !strings.Contains(log.String(), "2 probe(s)") || !strings.Contains(log.String(), "cenroq.io/finding") {
+		t.Errorf("warning = %q", log.String())
+	}
+
+	log.Reset()
+	warnDeprecatedIDs([]analyze.Probe{{ID: "clean", FindingID: "oq-0276"}})
+	if log.Len() != 0 {
+		t.Errorf("clean corpus warned: %q", log.String())
 	}
 }
