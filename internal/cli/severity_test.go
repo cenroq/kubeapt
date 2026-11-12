@@ -8,6 +8,8 @@ import (
 
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"github.com/cenroq/kubeapt/v2/pkg/policies"
 )
 
 func TestNormalizeSeverity(t *testing.T) {
@@ -40,11 +42,26 @@ func TestSeverityRankOrdering(t *testing.T) {
 }
 
 func TestPolicySeverityMap(t *testing.T) {
-	policies := []admissionregistrationv1.ValidatingAdmissionPolicy{
+	items := []admissionregistrationv1.ValidatingAdmissionPolicy{
 		{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:        "p-high",
-				Annotations: map[string]string{policyAnnotationSeverity: "High"},
+				Annotations: map[string]string{policies.AnnotationSeverity: "High"},
+			},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        "p-legacy",
+				Annotations: map[string]string{policies.LegacyAnnotationSeverity: "Low"},
+			},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "p-both",
+				Annotations: map[string]string{
+					policies.AnnotationSeverity:       "Critical",
+					policies.LegacyAnnotationSeverity: "Low",
+				},
 			},
 		},
 		{
@@ -53,9 +70,15 @@ func TestPolicySeverityMap(t *testing.T) {
 			},
 		},
 	}
-	m := policySeverityMap(policies)
+	m := policySeverityMap(items)
 	if m["p-high"] != severityHigh {
 		t.Errorf("expected High for p-high, got %q", m["p-high"])
+	}
+	if m["p-legacy"] != severityLow {
+		t.Errorf("expected the legacy key to be read for p-legacy, got %q", m["p-legacy"])
+	}
+	if m["p-both"] != severityCritical {
+		t.Errorf("expected security.cenroq.io to win for p-both, got %q", m["p-both"])
 	}
 	if m["p-missing"] != severityNotRated {
 		t.Errorf("expected Not Rated for p-missing, got %q", m["p-missing"])

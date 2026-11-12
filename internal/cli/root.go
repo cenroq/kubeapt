@@ -13,7 +13,7 @@ import (
 	"github.com/cenroq/kubeapt/v2/internal/logging"
 )
 
-const appVersion = "2.1.0"
+const appVersion = "2.2.0"
 
 var (
 	rootCmd = &cobra.Command{
@@ -54,10 +54,7 @@ func init() {
 	rootCmd.AddCommand(BundleCmd())
 	rootCmd.AddCommand(PoliciesCmd())
 	rootCmd.AddCommand(ConvertCmd())
-	// analyze is implemented and tested but deliberately not registered: its
-	// default probe bundle does not exist yet, so the command would fail on
-	// first run. Re-add rootCmd.AddCommand(AnalyzeCmd()) once the probe corpus
-	// ships inside the policy bundles.
+	rootCmd.AddCommand(AnalyzeCmd())
 }
 
 func getLogLevel() string {

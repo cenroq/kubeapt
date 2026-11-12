@@ -24,7 +24,7 @@ kind: ValidatingAdmissionPolicy
 metadata:
   name: test-policy
   annotations:
-    security.kubeapt.io/severity: high
+    security.cenroq.io/severity: high
 spec:
   failurePolicy: Fail
   matchConstraints:
@@ -69,7 +69,7 @@ kind: ValidatingAdmissionPolicy
 metadata:
   name: deploy-policy
   annotations:
-    security.kubeapt.io/severity: low
+    security.cenroq.io/severity: low
 spec:
   matchConstraints:
     resourceRules:
@@ -219,7 +219,7 @@ kind: ValidatingAdmissionPolicy
 metadata:
   name: p
   annotations:
-    security.kubeapt.io/severity: "` + annotation + `"
+    security.cenroq.io/severity: "` + annotation + `"
 spec:
   failurePolicy: Fail
   matchConstraints:
@@ -287,9 +287,9 @@ kind: ValidatingAdmissionPolicy
 metadata:
   name: annotated-policy
   annotations:
-    security.kubeapt.io/displayName: Privileged Containers Not Allowed
-    security.kubeapt.io/description: Containers must not run with privileged=true.
-    security.kubeapt.io/category: Pod Security
+    security.cenroq.io/displayName: Privileged Containers Not Allowed
+    security.cenroq.io/description: Containers must not run with privileged=true.
+    security.cenroq.io/category: Pod Security
 spec:
   failurePolicy: Fail
   matchConstraints:
@@ -338,20 +338,20 @@ spec:
     - expression: "true"
 `
 
-func TestPolicyMetadata_KubeaptAnnotationsPreferred(t *testing.T) {
+func TestPolicyMetadata_CenroqAnnotations(t *testing.T) {
 	bundle, err := policies.Load(fstest.MapFS{"p.yaml": {Data: []byte(policyWithAllAnnotationsYAML)}}, ".")
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
 	p, _ := bundle.Get("annotated-policy")
 	if got := p.Title(); got != "Privileged Containers Not Allowed" {
-		t.Errorf("Title() = %q, want kubeapt displayName", got)
+		t.Errorf("Title() = %q, want cenroq displayName", got)
 	}
 	if got := p.Description(); got != "Containers must not run with privileged=true." {
-		t.Errorf("Description() = %q, want kubeapt description", got)
+		t.Errorf("Description() = %q, want cenroq description", got)
 	}
 	if got := p.Category(); got != "Pod Security" {
-		t.Errorf("Category() = %q, want kubeapt category", got)
+		t.Errorf("Category() = %q, want cenroq category", got)
 	}
 }
 

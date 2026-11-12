@@ -22,7 +22,7 @@ kind: ValidatingAdmissionPolicy
 metadata:
   name: no-latest-tag
   annotations:
-    security.kubeapt.io/severity: Critical
+    security.cenroq.io/severity: Critical
 spec:
   matchConstraints:
     resourceRules:

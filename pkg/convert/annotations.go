@@ -21,11 +21,22 @@ const (
 
 // bridgedKeys are the annotation keys BridgeAnnotations owns. Everything else
 // is "unmapped" and subject to the keepUnmapped flag.
+//
+// The legacy security.kubeapt.io spellings are owned too, so they are never
+// copied through: a conversion reads them as fallbacks and writes the
+// security.cenroq.io keys in their place.
 var bridgedKeys = map[string]struct{}{
 	policies.AnnotationDisplayName:        {},
 	policies.AnnotationDescription:        {},
 	policies.AnnotationCategory:           {},
 	policies.AnnotationSeverity:           {},
+	policies.LegacyAnnotationDisplayName:  {},
+	policies.LegacyAnnotationDescription:  {},
+	policies.LegacyAnnotationCategory:     {},
+	policies.LegacyAnnotationSeverity:     {},
+	policies.LegacyAnnotationResource:     {},
+	policies.LegacyAnnotationRemediation:  {},
+	policies.LegacyAnnotationProduct:      {},
 	policies.KyvernoAnnotationTitle:       {},
 	policies.KyvernoAnnotationDescription: {},
 	policies.KyvernoAnnotationCategory:    {},
@@ -35,16 +46,22 @@ var bridgedKeys = map[string]struct{}{
 	AnnotationConvertTool:                 {},
 }
 
-// BridgeAnnotations maps policy metadata between kubeapt's
-// security.kubeapt.io annotations and Kyverno's policies.kyverno.io
-// equivalents, writing *both* key families.
+// BridgeAnnotations maps policy metadata between the security.cenroq.io
+// annotations and Kyverno's policies.kyverno.io equivalents, writing *both* key
+// families.
 //
 // Dual-emit is deliberate and runs in both directions. Kyverno consumers read
-// policies.kyverno.io/*, while keeping security.kubeapt.io/* verbatim is what
+// policies.kyverno.io/*, while keeping security.cenroq.io/* verbatim is what
 // makes a conversion reversible: the severity scales do not line up, so
 // deriving one from the other alone would turn Critical into high and then back
 // into High, silently downgrading the policy. Because the mapping prefers the
-// kubeapt key on input and rewrites both on output, it is also idempotent.
+// cenroq key on input and rewrites both on output, it is also idempotent.
+//
+// The deprecated security.kubeapt.io spellings are read as fallbacks and
+// migrated: the output carries the security.cenroq.io keys instead, and an
+// info note records the migration. resource, remediation and product have no
+// Kyverno equivalent, so they are migrated only when keepUnmapped is true,
+// just as they are copied through only then.
 //
 // Keys outside the bridged set are copied through when keepUnmapped is true.
 // Notes carry no Source or Target; use Report.Absorb to attach them.
@@ -59,12 +76,19 @@ func BridgeAnnotations(in map[string]string, keepUnmapped bool) (map[string]stri
 			}
 			out[k] = v
 		}
+		migrateUnmapped(out, in, policies.AnnotationResource, policies.LegacyAnnotationResource)
+		migrateUnmapped(out, in, policies.AnnotationRemediation, policies.LegacyAnnotationRemediation)
+		migrateUnmapped(out, in, policies.AnnotationProduct, policies.LegacyAnnotationProduct)
 	}
 
-	bridgeText(out, in, policies.AnnotationDisplayName, policies.KyvernoAnnotationTitle)
-	bridgeText(out, in, policies.AnnotationDescription, policies.KyvernoAnnotationDescription)
-	bridgeText(out, in, policies.AnnotationCategory, policies.KyvernoAnnotationCategory)
+	bridgeText(out, in, policies.AnnotationDisplayName, policies.LegacyAnnotationDisplayName, policies.KyvernoAnnotationTitle)
+	bridgeText(out, in, policies.AnnotationDescription, policies.LegacyAnnotationDescription, policies.KyvernoAnnotationDescription)
+	bridgeText(out, in, policies.AnnotationCategory, policies.LegacyAnnotationCategory, policies.KyvernoAnnotationCategory)
 	bridgeSeverity(out, in, &rep)
+
+	if policies.UsesLegacyAnnotations(in) {
+		rep.Infof("", "", "metadata.annotations", "migrated deprecated security.kubeapt.io annotations to security.cenroq.io")
+	}
 
 	if len(out) == 0 {
 		return nil, rep
@@ -72,34 +96,44 @@ func BridgeAnnotations(in map[string]string, keepUnmapped bool) (map[string]stri
 	return out, rep
 }
 
+// migrateUnmapped writes an annotation that has no Kyverno equivalent under
+// its security.cenroq.io key, taking the value from the legacy
+// security.kubeapt.io key when the cenroq one is absent or blank.
+func migrateUnmapped(out, in map[string]string, cenroqKey, legacyKey string) {
+	if value := policies.LookupAnnotation(in, cenroqKey, legacyKey); value != "" {
+		out[cenroqKey] = value
+	}
+}
+
 // bridgeText copies one text annotation to both key families, preferring the
-// kubeapt spelling when a document carries both.
-func bridgeText(out, in map[string]string, kubeaptKey, kyvernoKey string) {
-	value := policies.LookupAnnotation(in, kubeaptKey, kyvernoKey)
+// security.cenroq.io spelling, then the legacy security.kubeapt.io one, then
+// Kyverno's.
+func bridgeText(out, in map[string]string, cenroqKey, legacyKey, kyvernoKey string) {
+	value := policies.LookupAnnotation(in, cenroqKey, legacyKey, kyvernoKey)
 	if value == "" {
 		return
 	}
-	out[kubeaptKey] = value
+	out[cenroqKey] = value
 	out[kyvernoKey] = value
 }
 
 // bridgeSeverity copies the severity annotation to both key families,
-// translating between the two scales. The kubeapt value is never rewritten:
+// translating between the two scales. The cenroq value is never rewritten:
 // preserving it verbatim is what keeps Critical and Info recoverable, since
 // Kyverno's scale cannot express them.
 func bridgeSeverity(out, in map[string]string, rep *Report) {
-	kubeaptRaw := policies.LookupAnnotation(in, policies.AnnotationSeverity)
+	cenroqRaw := policies.LookupAnnotation(in, policies.AnnotationSeverity, policies.LegacyAnnotationSeverity)
 	kyvernoRaw := policies.LookupAnnotation(in, policies.KyvernoAnnotationSeverity)
 
-	if kubeaptRaw != "" {
-		out[policies.AnnotationSeverity] = kubeaptRaw
-		mapped, lossy, ok := SeverityToKyverno(kubeaptRaw)
+	if cenroqRaw != "" {
+		out[policies.AnnotationSeverity] = cenroqRaw
+		mapped, lossy, ok := SeverityToKyverno(cenroqRaw)
 		switch {
 		case ok:
 			out[policies.KyvernoAnnotationSeverity] = mapped
 			if lossy {
 				rep.Infof("", "", "metadata.annotations", "severity %s has no kyverno equivalent and maps to %s; the original is kept under %s",
-					kubeaptRaw, mapped, policies.AnnotationSeverity)
+					cenroqRaw, mapped, policies.AnnotationSeverity)
 			}
 		case kyvernoRaw != "":
 			out[policies.KyvernoAnnotationSeverity] = kyvernoRaw
@@ -116,7 +150,7 @@ func bridgeSeverity(out, in map[string]string, rep *Report) {
 	}
 }
 
-// SeverityToKyverno maps a raw kubeapt severity annotation onto Kyverno's
+// SeverityToKyverno maps a raw security.cenroq.io severity annotation onto Kyverno's
 // low, medium, and high scale. lossy reports that the scales do not line up
 // exactly; ok is false for Not Rated and unrecognized values, which are not
 // emitted.

@@ -9,6 +9,7 @@ import (
     metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
     "github.com/cenroq/kubeapt/v2/internal/config"
+    "github.com/cenroq/kubeapt/v2/pkg/policies"
 )
 
 func setHome(t *testing.T) {
@@ -67,14 +68,52 @@ func TestPolicyAnnotationsFrom(t *testing.T) {
     policy := admissionregistrationv1.ValidatingAdmissionPolicy{
         ObjectMeta: metav1.ObjectMeta{
             Annotations: map[string]string{
-                policyAnnotationDisplayName: "Demo",
-                policyAnnotationSeverity:    "high",
+                policies.AnnotationDisplayName: "Demo",
+                policies.AnnotationSeverity:    "high",
+                policies.AnnotationResource:    "pods",
+                policies.AnnotationRemediation: "drop it",
+                policies.AnnotationProduct:     "kubernetes",
+                policies.AnnotationDescription: "describes",
+                policies.AnnotationFinding:     " oq-0327 ",
             },
         },
     }
     ann := policyAnnotationsFrom(policy)
-    if ann.DisplayName != "Demo" || ann.Severity != "high" {
-        t.Fatalf("unexpected annotations: %+v", ann)
+    want := policyAnnotations{DisplayName: "Demo", Description: "describes", Resource: "pods", Severity: "high", Remediation: "drop it", Product: "kubernetes",
+        Finding: "oq-0327", Docs: policies.DocsBaseURL + "/oq-0327"}
+    if ann != want {
+        t.Fatalf("annotations = %+v, want %+v", ann, want)
+    }
+}
+
+func TestPolicyAnnotationsFromWithoutAnnotations(t *testing.T) {
+    if got := policyAnnotationsFrom(admissionregistrationv1.ValidatingAdmissionPolicy{}); got != (policyAnnotations{}) {
+        t.Fatalf("annotations = %+v, want zero value", got)
+    }
+}
+
+// Policy sets published before the switch carry only security.kubeapt.io
+// keys; they must still be shown, and security.cenroq.io wins when both exist.
+func TestPolicyAnnotationsFromLegacyKeys(t *testing.T) {
+    policy := admissionregistrationv1.ValidatingAdmissionPolicy{
+        ObjectMeta: metav1.ObjectMeta{
+            Annotations: map[string]string{
+                policies.LegacyAnnotationDisplayName: "Old",
+                policies.LegacyAnnotationDescription: "old description",
+                policies.LegacyAnnotationResource:    "pods",
+                policies.LegacyAnnotationSeverity:    "low",
+                policies.LegacyAnnotationRemediation: "old fix",
+                policies.LegacyAnnotationProduct:     "kubernetes",
+                policies.AnnotationDisplayName:       "New",
+                policies.AnnotationUUID:              "23ef68db",
+            },
+        },
+    }
+    ann := policyAnnotationsFrom(policy)
+    want := policyAnnotations{DisplayName: "New", Description: "old description", Resource: "pods", Severity: "low", Remediation: "old fix", Product: "kubernetes",
+        Finding: "23ef68db", Docs: policies.DocsBaseURL + "/23ef68db"}
+    if ann != want {
+        t.Fatalf("annotations = %+v, want %+v", ann, want)
     }
 }
 

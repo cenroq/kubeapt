@@ -203,3 +203,53 @@ func TestDiffSetPathsNilInputs(t *testing.T) {
 		t.Errorf("nil returned: got %v", got)
 	}
 }
+
+// A manifest round-tripped through kubectl carries server-owned fields; the
+// server replacing them is not a mutation.
+func TestDiffSetPathsIgnoresServerOwnedFieldsInManifest(t *testing.T) {
+	submitted := object(t, `{"metadata":{"name":"p","creationTimestamp":null,"uid":"old"},"status":{"phase":"Running"}}`)
+	returned := object(t, `{"metadata":{"name":"p","creationTimestamp":"2026-01-01T00:00:00Z","uid":"new"},"status":{}}`)
+	if got := analyze.DiffSetPaths(submitted, returned); len(got) != 0 {
+		t.Fatalf("got %v, want no mutations", got)
+	}
+}
+
+func TestDiffSetPathsTypeChanges(t *testing.T) {
+	tests := []struct {
+		name      string
+		submitted string
+		returned  string
+	}{
+		{"slice to scalar", `{"spec":{"args":["a"]}}`, `{"spec":{"args":"a"}}`},
+		{"string to number", `{"spec":{"replicas":"1"}}`, `{"spec":{"replicas":1}}`},
+		{"quantity to garbage", `{"spec":{"cpu":"1000m"}}`, `{"spec":{"cpu":"lots"}}`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := analyze.DiffSetPaths(object(t, tc.submitted), object(t, tc.returned)); len(got) != 1 {
+				t.Fatalf("got %v, want exactly one changed path", got)
+			}
+		})
+	}
+}
+
+// Callers building objects by hand use Go's own numeric types; all of them
+// compare by value against the int64 the dynamic client decodes.
+func TestDiffSetPathsNumericOperandTypes(t *testing.T) {
+	submitted := &unstructured.Unstructured{Object: map[string]any{
+		"int": int(1), "int32": int32(2), "float32": float32(3), "number": json.Number("4"),
+	}}
+	returned := &unstructured.Unstructured{Object: map[string]any{
+		"int": int64(1), "int32": int64(2), "float32": int64(3), "number": int64(4),
+	}}
+	if got := analyze.DiffSetPaths(submitted, returned); len(got) != 0 {
+		t.Fatalf("got %v, want no mutations", got)
+	}
+
+	// A json.Number that is not a number is compared as-is, not as zero.
+	bad := &unstructured.Unstructured{Object: map[string]any{"n": json.Number("x")}}
+	zero := &unstructured.Unstructured{Object: map[string]any{"n": int64(0)}}
+	if got := analyze.DiffSetPaths(bad, zero); !reflect.DeepEqual(got, []string{"n"}) {
+		t.Fatalf("got %v, want [n]", got)
+	}
+}

@@ -29,14 +29,6 @@ import (
 const (
 	policiesIndexURL = "https://raw.githubusercontent.com/cenroq/kubernetes-security-policies/refs/heads/main/admission/ValidatingAdmissionPolicy/policies/policies.json"
 	policiesArchive  = "policies.tar.gz"
-
-	policyAnnotationDisplayName = policies.AnnotationDisplayName
-	policyAnnotationDescription = policies.AnnotationDescription
-	policyAnnotationSeverity    = policies.AnnotationSeverity
-
-	policyAnnotationResource    = "security.kubeapt.io/resource"
-	policyAnnotationRemediation = "security.kubeapt.io/remediation"
-	policyAnnotationProduct     = "security.kubeapt.io/product"
 )
 
 type policiesIndex struct {
@@ -55,6 +47,8 @@ type policySummary struct {
 	DisplayName string `json:"displayName"`
 	Description string `json:"description"`
 	Product     string `json:"product"`
+	Finding     string `json:"finding,omitempty"`
+	Docs        string `json:"docs,omitempty"`
 }
 
 type policyAnnotations struct {
@@ -64,6 +58,10 @@ type policyAnnotations struct {
 	Severity    string `json:"severity"`
 	Remediation string `json:"remediation"`
 	Product     string `json:"product"`
+	// Finding is the policy's catalogue id (cenroq.io/finding), and Docs the
+	// catalogue page it links to; both are empty when the policy has no id.
+	Finding string `json:"finding"`
+	Docs    string `json:"docs"`
 }
 
 func PoliciesCmd() *cobra.Command {
@@ -459,6 +457,8 @@ func runPolicyShow(cmd *cobra.Command, policyName, version, format string) error
 		t.AppendRow(table.Row{"severity", annotations.Severity})
 		t.AppendRow(table.Row{"remediation", annotations.Remediation})
 		t.AppendRow(table.Row{"product", annotations.Product})
+		t.AppendRow(table.Row{"finding", annotations.Finding})
+		t.AppendRow(table.Row{"docs", annotations.Docs})
 		t.Render()
 	}
 	return nil
@@ -482,6 +482,8 @@ func renderPolicySummary(cmd *cobra.Command, index policiesIndex, version, forma
 			DisplayName: policy.DisplayName,
 			Description: policy.Description,
 			Product:     policy.Product,
+			Finding:     policy.Finding,
+			Docs:        policy.Docs,
 		})
 	}
 
@@ -740,12 +742,18 @@ func policyAnnotationsFrom(policy admissionregistrationv1.ValidatingAdmissionPol
 	if meta == nil {
 		return annotations
 	}
-	annotations.DisplayName = strings.TrimSpace(meta[policyAnnotationDisplayName])
-	annotations.Description = strings.TrimSpace(meta[policyAnnotationDescription])
-	annotations.Resource = strings.TrimSpace(meta[policyAnnotationResource])
-	annotations.Severity = strings.TrimSpace(meta[policyAnnotationSeverity])
-	annotations.Remediation = strings.TrimSpace(meta[policyAnnotationRemediation])
-	annotations.Product = strings.TrimSpace(meta[policyAnnotationProduct])
+	// Each field reads security.cenroq.io first and falls back to the legacy
+	// security.kubeapt.io spelling. Kyverno keys are deliberately not read:
+	// this view shows what the policy set itself declares.
+	annotations.DisplayName = policies.LookupAnnotation(meta, policies.AnnotationDisplayName, policies.LegacyAnnotationDisplayName)
+	annotations.Description = policies.LookupAnnotation(meta, policies.AnnotationDescription, policies.LegacyAnnotationDescription)
+	annotations.Resource = policies.LookupAnnotation(meta, policies.AnnotationResource, policies.LegacyAnnotationResource)
+	annotations.Severity = policies.LookupAnnotation(meta, policies.AnnotationSeverity, policies.LegacyAnnotationSeverity)
+	annotations.Remediation = policies.LookupAnnotation(meta, policies.AnnotationRemediation, policies.LegacyAnnotationRemediation)
+	annotations.Product = policies.LookupAnnotation(meta, policies.AnnotationProduct, policies.LegacyAnnotationProduct)
+	// cenroq.io/finding, falling back to the deprecated kubeapt.io/uuid.
+	annotations.Finding, _ = policies.FindingID(meta)
+	annotations.Docs = policies.DocsURL(annotations.Finding)
 	return annotations
 }
 

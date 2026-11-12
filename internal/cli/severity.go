@@ -4,9 +4,12 @@
 package cli
 
 import (
+	"fmt"
+
 	"github.com/fatih/color"
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 
+	"github.com/cenroq/kubeapt/v2/internal/logging"
 	"github.com/cenroq/kubeapt/v2/pkg/policies"
 	"github.com/cenroq/kubeapt/v2/pkg/types"
 )
@@ -58,10 +61,47 @@ func severityColor(severity string) *color.Color {
 	}
 }
 
-func policySeverityMap(policies []admissionregistrationv1.ValidatingAdmissionPolicy) map[string]string {
-	out := make(map[string]string, len(policies))
-	for _, policy := range policies {
-		out[policy.Name] = normalizeSeverity(policy.Annotations[policyAnnotationSeverity])
+// Annotation families named in the deprecation warnings.
+const (
+	cenroqAnnotationFamily = "security.cenroq.io/*"
+	legacyAnnotationFamily = "security.kubeapt.io/*"
+)
+
+// logDeprecatedPolicyAnnotations logs once, not per policy, when policy
+// metadata is still read from the deprecated security.kubeapt.io annotations.
+//
+// It logs at debug level only. Every policy set published so far (up to
+// cenroq-best-practices v0.4.0) carries the old keys, so a warning would fire on
+// every run with nothing for the user to do. Raise it to a warning once the
+// published policy sets carry security.cenroq.io.
+func logDeprecatedPolicyAnnotations(items []admissionregistrationv1.ValidatingAdmissionPolicy) {
+	if note := deprecatedPolicyAnnotationsNote(items); note != "" {
+		logging.Debugf("%s", note)
+	}
+}
+
+// deprecatedPolicyAnnotationsNote is the line logDeprecatedPolicyAnnotations
+// logs, or "" when no policy reads the deprecated annotations.
+func deprecatedPolicyAnnotationsNote(items []admissionregistrationv1.ValidatingAdmissionPolicy) string {
+	deprecated := 0
+	for _, policy := range items {
+		if policies.UsesLegacyAnnotations(policy.Annotations) {
+			deprecated++
+		}
+	}
+	if deprecated == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%d policy(ies) take their metadata from the deprecated %s annotations; newer policy sets use %s",
+		deprecated, legacyAnnotationFamily, cenroqAnnotationFamily)
+}
+
+// policySeverityMap reads each policy's severity, security.cenroq.io first and
+// the legacy security.kubeapt.io key as a fallback.
+func policySeverityMap(items []admissionregistrationv1.ValidatingAdmissionPolicy) map[string]string {
+	out := make(map[string]string, len(items))
+	for _, policy := range items {
+		out[policy.Name] = normalizeSeverity(policies.LookupAnnotation(policy.Annotations, policies.AnnotationSeverity, policies.LegacyAnnotationSeverity))
 	}
 	return out
 }

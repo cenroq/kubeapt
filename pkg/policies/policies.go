@@ -32,15 +32,141 @@ import (
 var ErrDuplicatePolicy = errors.New("policies: duplicate policy id")
 
 // Annotation keys read from a parsed policy's metadata.
+//
+// The security.cenroq.io keys are authoritative. Policy sets published before
+// the switch carry the same metadata under security.kubeapt.io, which is read
+// only as a fallback (see the LegacyAnnotation constants). Read metadata
+// through the *FromAnnotations accessors rather than indexing the map, so the
+// precedence lives in one place.
 const (
-	AnnotationSeverity    = "security.kubeapt.io/severity"
-	AnnotationDisplayName = "security.kubeapt.io/displayName"
-	AnnotationDescription = "security.kubeapt.io/description"
-	AnnotationCategory    = "security.kubeapt.io/category"
+	AnnotationSeverity    = "security.cenroq.io/severity"
+	AnnotationDisplayName = "security.cenroq.io/displayName"
+	AnnotationDescription = "security.cenroq.io/description"
+	AnnotationCategory    = "security.cenroq.io/category"
+	AnnotationResource    = "security.cenroq.io/resource"
+	AnnotationRemediation = "security.cenroq.io/remediation"
+	AnnotationProduct     = "security.cenroq.io/product"
+
+	// AnnotationFinding carries the policy's cenroq finding id, such as
+	// "oq-0276". It is read verbatim; nothing is derived or hashed from it. The
+	// same id is stamped on the policy and on the deny manifest that probes it,
+	// which is what lets an analyze result name the policy that should have
+	// blocked it.
+	AnnotationFinding = "cenroq.io/finding"
+
+	// AnnotationUUID is the catalogue identifier policy sets stamped before
+	// finding ids existed.
+	//
+	// Deprecated: read only as a fallback for AnnotationFinding. Future policy
+	// sets carry AnnotationFinding alone.
+	AnnotationUUID = "kubeapt.io/uuid"
 )
 
-// Kyverno annotation keys, read as fallbacks by the accessors below and written
-// alongside their security.kubeapt.io equivalents by policy conversion.
+// Legacy spellings of the metadata annotations, used by policy sets published
+// before the switch to security.cenroq.io.
+//
+// Deprecated: read only as fallbacks for the matching Annotation constant.
+// Future policy sets carry the security.cenroq.io keys alone.
+const (
+	LegacyAnnotationSeverity    = "security.kubeapt.io/severity"
+	LegacyAnnotationDisplayName = "security.kubeapt.io/displayName"
+	LegacyAnnotationDescription = "security.kubeapt.io/description"
+	LegacyAnnotationCategory    = "security.kubeapt.io/category"
+	LegacyAnnotationResource    = "security.kubeapt.io/resource"
+	LegacyAnnotationRemediation = "security.kubeapt.io/remediation"
+	LegacyAnnotationProduct     = "security.kubeapt.io/product"
+)
+
+// legacyAnnotations pairs each metadata key with its deprecated spelling, in
+// a fixed order so UsesLegacyAnnotations is deterministic.
+var legacyAnnotations = [...][2]string{
+	{AnnotationSeverity, LegacyAnnotationSeverity},
+	{AnnotationDisplayName, LegacyAnnotationDisplayName},
+	{AnnotationDescription, LegacyAnnotationDescription},
+	{AnnotationCategory, LegacyAnnotationCategory},
+	{AnnotationResource, LegacyAnnotationResource},
+	{AnnotationRemediation, LegacyAnnotationRemediation},
+	{AnnotationProduct, LegacyAnnotationProduct},
+}
+
+// DisplayNameFromAnnotations returns the policy's display name from a
+// metadata.annotations map: security.cenroq.io first, then the legacy
+// security.kubeapt.io key, then Kyverno's title. "" when none is set.
+func DisplayNameFromAnnotations(in map[string]string) string {
+	return LookupAnnotation(in, AnnotationDisplayName, LegacyAnnotationDisplayName, KyvernoAnnotationTitle)
+}
+
+// DescriptionFromAnnotations returns the description with the same
+// precedence as DisplayNameFromAnnotations.
+func DescriptionFromAnnotations(in map[string]string) string {
+	return LookupAnnotation(in, AnnotationDescription, LegacyAnnotationDescription, KyvernoAnnotationDescription)
+}
+
+// CategoryFromAnnotations returns the category with the same precedence as
+// DisplayNameFromAnnotations.
+func CategoryFromAnnotations(in map[string]string) string {
+	return LookupAnnotation(in, AnnotationCategory, LegacyAnnotationCategory, KyvernoAnnotationCategory)
+}
+
+// SeverityFromAnnotations returns the normalized severity: security.cenroq.io
+// first, then the legacy security.kubeapt.io key.
+//
+// It deliberately never reads Kyverno's severity. Kyverno spells the middle
+// rung "medium", which NormalizeSeverity does not know, so accepting it would
+// quietly report a medium-severity policy as Not Rated.
+func SeverityFromAnnotations(in map[string]string) types.Severity {
+	return NormalizeSeverity(LookupAnnotation(in, AnnotationSeverity, LegacyAnnotationSeverity))
+}
+
+// UsesLegacyAnnotations reports whether any metadata value would be read from
+// a deprecated security.kubeapt.io key because its security.cenroq.io key is
+// absent or blank. Callers use it to warn that a policy set needs replacing.
+func UsesLegacyAnnotations(in map[string]string) bool {
+	for _, pair := range legacyAnnotations {
+		if LookupAnnotation(in, pair[0]) == "" && LookupAnnotation(in, pair[1]) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// FindingID returns the trimmed finding id from a metadata.annotations map:
+// AnnotationFinding when set, else the deprecated AnnotationUUID. deprecated
+// reports that the fallback supplied the id, so a caller can warn that the
+// policy set needs re-publishing. A nil map yields "".
+func FindingID(annotations map[string]string) (id string, deprecated bool) {
+	if id := strings.TrimSpace(annotations[AnnotationFinding]); id != "" {
+		return id, false
+	}
+	if id := strings.TrimSpace(annotations[AnnotationUUID]); id != "" {
+		return id, true
+	}
+	return "", false
+}
+
+// DocsBaseURL is the root of the published policy catalogue.
+const DocsBaseURL = "https://cenroq.com/open-source/policies"
+
+// DocsURL returns the catalogue page for a finding id, or "" when unset.
+// There is deliberately no fallback: a policy with no id has no page, and
+// linking to a guessed one would be worse than linking to nothing.
+func DocsURL(findingID string) string {
+	findingID = strings.TrimSpace(findingID)
+	if findingID == "" {
+		return ""
+	}
+	return DocsBaseURL + "/" + findingID
+}
+
+// DocsURLFromAnnotations resolves a metadata.annotations map to its catalogue
+// page via FindingID, or "" when the map carries no id.
+func DocsURLFromAnnotations(meta map[string]string) string {
+	id, _ := FindingID(meta)
+	return DocsURL(id)
+}
+
+// Kyverno annotation keys, read as the last fallback by the accessors above and
+// written alongside their security.cenroq.io equivalents by policy conversion.
 const (
 	KyvernoAnnotationTitle       = "policies.kyverno.io/title"
 	KyvernoAnnotationDescription = "policies.kyverno.io/description"
@@ -64,7 +190,7 @@ func (p *Policy) Parsed(_ scanaccess.Token) *scanaccess.Parsed {
 
 // Title returns the policy's display name, falling back to ID.
 func (p *Policy) Title() string {
-	if v := p.lookupAnnotation(AnnotationDisplayName, KyvernoAnnotationTitle); v != "" {
+	if v := DisplayNameFromAnnotations(p.annotations()); v != "" {
 		return v
 	}
 	return p.ID
@@ -72,20 +198,31 @@ func (p *Policy) Title() string {
 
 // Description returns the policy's description, or "" if unset.
 func (p *Policy) Description() string {
-	return p.lookupAnnotation(AnnotationDescription, KyvernoAnnotationDescription)
+	return DescriptionFromAnnotations(p.annotations())
 }
 
 // Category returns the policy's category, or "" if unset.
 func (p *Policy) Category() string {
-	return p.lookupAnnotation(AnnotationCategory, KyvernoAnnotationCategory)
+	return CategoryFromAnnotations(p.annotations())
 }
 
-// lookupAnnotation returns the first non-empty annotation value, or "".
-func (p *Policy) lookupAnnotation(keys ...string) string {
+// FindingID returns the policy's finding id, falling back to the deprecated
+// AnnotationUUID, or "" if neither is set.
+func (p *Policy) FindingID() string {
+	return LookupAnnotation(p.annotations(), AnnotationFinding, AnnotationUUID)
+}
+
+// DocsURL returns the policy's catalogue page, or "" if it carries no id.
+func (p *Policy) DocsURL() string {
+	return DocsURL(p.FindingID())
+}
+
+// annotations returns the policy's metadata.annotations, or nil.
+func (p *Policy) annotations() map[string]string {
 	if p == nil || p.parsed == nil || p.parsed.VAP == nil {
-		return ""
+		return nil
 	}
-	return LookupAnnotation(p.parsed.VAP.Annotations, keys...)
+	return p.parsed.VAP.Annotations
 }
 
 // LookupAnnotation returns the first non-empty, trimmed value among keys, or "".
@@ -308,7 +445,7 @@ func Load(fsys fs.FS, root string) (*Bundle, error) {
 			}
 			bindingYAML = joinYAMLDocuments(docs)
 		}
-		severity := severityFromAnnotations(pp.vap.Annotations)
+		severity := SeverityFromAnnotations(pp.vap.Annotations)
 		policy := &Policy{
 			ID:          pp.id,
 			RawYAML:     pp.yaml,
@@ -442,11 +579,6 @@ func joinYAMLDocuments(docs [][]byte) []byte {
 		buf.Write(d)
 	}
 	return buf.Bytes()
-}
-
-// severityFromAnnotations normalizes the severity annotation to a Severity.
-func severityFromAnnotations(annotations map[string]string) types.Severity {
-	return NormalizeSeverity(annotations[AnnotationSeverity])
 }
 
 // NormalizeSeverity maps a raw annotation value onto kubeapt's severity scale,

@@ -2,7 +2,8 @@
 // Contact: info@cenroq.com
 
 // Package scanner evaluates a loaded policies.Bundle against a slice of
-// in-memory Kubernetes manifests and returns structured findings.
+// in-memory Kubernetes manifests and returns structured findings, plus the
+// outcome (pass, fail or error) of every policy for every object it applies to.
 //
 // The scanner is the only public entrypoint kubeapt exposes for embedding
 // the policy engine into another Go program. It does not talk to the
@@ -13,6 +14,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
@@ -69,6 +71,11 @@ func New(bundle *policies.Bundle, opts ...Option) (*Scanner, error) {
 }
 
 // Scan evaluates every policy against every manifest, returning aggregated results.
+//
+// Findings and ScanErrors report violations and evaluation failures.
+// Evaluations additionally records one entry per (policy, binding, manifest)
+// the policy applies to, including the ones that passed, so a caller can tell
+// "checked and compliant" apart from "never applied".
 func (s *Scanner) Scan(ctx context.Context, manifests []types.Manifest) (*types.Result, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -94,6 +101,7 @@ func (s *Scanner) Scan(ctx context.Context, manifests []types.Manifest) (*types.
 		if len(bindings) == 0 {
 			continue
 		}
+		findingID := policy.FindingID()
 
 		for _, binding := range bindings {
 			if err := ctx.Err(); err != nil {
@@ -103,7 +111,7 @@ func (s *Scanner) Scan(ctx context.Context, manifests []types.Manifest) (*types.
 				if err := ctx.Err(); err != nil {
 					return nil, err
 				}
-				s.evaluate(policy.ID, parsed, binding, manifest, result)
+				s.evaluate(policy.ID, findingID, parsed, binding, manifest, result)
 			}
 		}
 	}
@@ -127,7 +135,7 @@ func implicitBinding(policyName string) *admissionregistrationv1.ValidatingAdmis
 }
 
 func (s *Scanner) evaluate(
-	policyID string,
+	policyID, findingID string,
 	parsed *scanaccess.Parsed,
 	binding *admissionregistrationv1.ValidatingAdmissionPolicyBinding,
 	manifest types.Manifest,
@@ -144,29 +152,56 @@ func (s *Scanner) evaluate(
 		}
 	}
 
+	// From here on the policy applies to the object, so exactly one
+	// Evaluation is recorded whatever the outcome.
+	evaluation := types.Evaluation{
+		PolicyID:  policyID,
+		FindingID: findingID,
+		Binding:   binding.Name,
+		Resource:  ref,
+		Severity:  parsed.Severity,
+	}
+
 	eval, err := kubernetes.EvaluateValidations(parsed.VAP, binding, manifest, ref.Namespace, nil)
 	if err != nil {
+		wrapped := fmt.Errorf("scanner: evaluate policy %s against %s: %w", policyID, formatRef(ref), err)
 		result.ScanErrors = append(result.ScanErrors, types.ScanError{
 			PolicyID: policyID,
 			Resource: ref,
-			Err:      fmt.Errorf("scanner: evaluate policy %s against %s: %w", policyID, formatRef(ref), err),
+			Err:      wrapped,
 		})
+		evaluation.Outcome = types.OutcomeError
+		evaluation.Error = wrapped.Error()
+		result.Evaluations = append(result.Evaluations, evaluation)
 		return
 	}
 	if eval.Compliant {
+		evaluation.Outcome = types.OutcomePass
+		result.Evaluations = append(result.Evaluations, evaluation)
 		return
 	}
 
+	evaluation.Outcome = types.OutcomeFail
+	evaluation.Violations = make([]types.Violation, 0, len(eval.Violations))
 	for _, v := range eval.Violations {
 		result.Findings = append(result.Findings, types.Finding{
-			PolicyID: policyID,
-			Resource: ref,
-			Severity: parsed.Severity,
-			Message:  v.Message,
-			Path:     v.Path,
-			Actions:  v.Actions,
+			PolicyID:  policyID,
+			FindingID: findingID,
+			Resource:  ref,
+			Severity:  parsed.Severity,
+			Message:   v.Message,
+			Path:      v.Path,
+			Actions:   v.Actions,
+		})
+		// Actions gets its own backing array so a caller editing a Finding
+		// cannot silently change the Evaluation, or the other way round.
+		evaluation.Violations = append(evaluation.Violations, types.Violation{
+			Message: v.Message,
+			Path:    v.Path,
+			Actions: slices.Clone(v.Actions),
 		})
 	}
+	result.Evaluations = append(result.Evaluations, evaluation)
 }
 
 func resourceRefFromManifest(m types.Manifest) types.ResourceRef {

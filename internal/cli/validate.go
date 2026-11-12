@@ -413,6 +413,7 @@ func runValidate(cmd *cobra.Command, _ []string) error {
 		bindings = implicitBindingsForPolicies(policies)
 	}
 
+	logDeprecatedPolicyAnnotations(policies)
 	severityByPolicy := policySeverityMap(policies)
 
 	var resources []map[string]interface{}

@@ -31,12 +31,18 @@ import (
 )
 
 // Annotation keys carrying probe intent. The descriptive metadata reuses the
-// security.kubeapt.io/* vocabulary that policies already use, so a probe
-// bundle and a policy bundle are annotated the same way.
+// security.cenroq.io/* vocabulary that policies use (with the legacy
+// security.kubeapt.io/* spelling as a fallback), so a probe bundle and a
+// policy bundle are annotated the same way.
 const (
 	AnnotationProbeID     = "analyze.kubeapt.io/id"
 	AnnotationProbeExpect = "analyze.kubeapt.io/expect"
 )
+
+// AnnotationFinding is the finding id a deny manifest shares with the policy
+// that should reject it. It is the only cenroq annotation the shipped probe
+// corpus carries, so it is how a result names its policy.
+const AnnotationFinding = policies.AnnotationFinding
 
 // Expectation records what a correctly configured cluster should do with a probe.
 type Expectation string
@@ -60,6 +66,29 @@ type Probe struct {
 	Severity    types.Severity
 	Expect      Expectation
 	SourceFile  string
+
+	// FindingID is the finding id shared with the policy this probe tests,
+	// such as "oq-0276", read from cenroq.io/finding. Empty for probe sets
+	// that do not stamp one.
+	FindingID string
+
+	// DeprecatedID reports that FindingID was read from the deprecated
+	// kubeapt.io/uuid annotation, which future policy sets no longer carry.
+	DeprecatedID bool
+
+	// DeprecatedAnnotations reports that some of the probe's own metadata was
+	// read from a deprecated security.kubeapt.io annotation.
+	DeprecatedAnnotations bool
+
+	// Policy is the policy this probe's finding id resolves to, when the
+	// caller supplied an index to resolve it against. Probe manifests carry
+	// only the id, so display metadata comes from the policy, not the probe.
+	Policy *PolicyRef
+
+	// Unsupported, when set, explains why this probe cannot be exercised by a
+	// dry-run create. Such a probe is still reported -- as Skipped, never as a
+	// pass -- because an untested technique is not a defended one.
+	Unsupported string
 
 	// Object is the manifest to submit, with kubeapt's own annotations
 	// removed. It is a deep copy, so building a Probe never mutates the
@@ -91,21 +120,53 @@ func NewProbe(obj *unstructured.Unstructured, sourceFile string) (Probe, error) 
 	sanitised := obj.DeepCopy()
 	stripProbeAnnotations(sanitised)
 
+	findingID, deprecatedID := policies.FindingID(annotations)
+
 	return Probe{
 		ID:          probeID(annotations[AnnotationProbeID], sourceFile, obj),
 		DisplayName: displayName(annotations, obj),
-		Description: policies.LookupAnnotation(annotations, policies.AnnotationDescription, policies.KyvernoAnnotationDescription),
-		Category:    policies.LookupAnnotation(annotations, policies.AnnotationCategory, policies.KyvernoAnnotationCategory),
-		// Severity deliberately reads only the kubeapt key. Kyverno's scale
-		// spells the middle rung "medium", which NormalizeSeverity does not
-		// know, so accepting the Kyverno key here would quietly report a
-		// medium-severity probe as Not Rated. Title, description and category
-		// are plain strings with no such mismatch, so they do fall back.
-		Severity:   policies.NormalizeSeverity(annotations[policies.AnnotationSeverity]),
-		Expect:     expect,
-		SourceFile: sourceFile,
-		Object:     sanitised,
+		Description: policies.DescriptionFromAnnotations(annotations),
+		Category:    policies.CategoryFromAnnotations(annotations),
+		// Severity never falls back to the Kyverno key; see
+		// policies.SeverityFromAnnotations for why.
+		Severity:              policies.SeverityFromAnnotations(annotations),
+		Expect:                expect,
+		SourceFile:            sourceFile,
+		FindingID:             findingID,
+		DeprecatedID:          deprecatedID,
+		DeprecatedAnnotations: policies.UsesLegacyAnnotations(annotations),
+		Object:                sanitised,
 	}, nil
+}
+
+// DocsURL returns the catalogue page for the policy this probe tests, or ""
+// when the probe carries no finding id.
+func (p Probe) DocsURL() string { return policies.DocsURL(p.FindingID) }
+
+// Title returns the best available human label for the probe: the policy's
+// display name when the finding id resolved, else the probe's own.
+//
+// The policy wins because a shipped deny manifest carries no descriptive
+// annotations at all, so Probe.DisplayName has already fallen back to
+// "Kind name" -- a label that names the fixture rather than the weakness it
+// tests.
+func (p Probe) Title() string {
+	if p.Policy != nil && p.Policy.DisplayName != "" {
+		return p.Policy.DisplayName
+	}
+	return p.DisplayName
+}
+
+// Summary returns the best available description: the probe's own when it has
+// one, else the policy's. Same reasoning as Title.
+func (p Probe) Summary() string {
+	if p.Description != "" {
+		return p.Description
+	}
+	if p.Policy != nil {
+		return p.Policy.Description
+	}
+	return ""
 }
 
 // parseExpectation rejects an unrecognised value rather than defaulting it. A
@@ -142,7 +203,7 @@ func probeID(annotated, sourceFile string, obj *unstructured.Unstructured) strin
 }
 
 func displayName(annotations map[string]string, obj *unstructured.Unstructured) string {
-	if name := policies.LookupAnnotation(annotations, policies.AnnotationDisplayName, policies.KyvernoAnnotationTitle); name != "" {
+	if name := policies.DisplayNameFromAnnotations(annotations); name != "" {
 		return name
 	}
 	if name := obj.GetName(); name != "" {
@@ -153,7 +214,7 @@ func displayName(annotations map[string]string, obj *unstructured.Unstructured) 
 
 // stripProbeAnnotations removes kubeapt's own annotations from the object that
 // goes over the wire. A policy is free to match on annotations, and a probe
-// carrying "security.kubeapt.io/severity: Critical" would be a different object
+// carrying "security.cenroq.io/severity: Critical" would be a different object
 // from the dangerous one the bundle author meant to test.
 func stripProbeAnnotations(obj *unstructured.Unstructured) {
 	annotations := obj.GetAnnotations()
@@ -175,7 +236,36 @@ func stripProbeAnnotations(obj *unstructured.Unstructured) {
 	obj.SetAnnotations(remaining)
 }
 
+// isProbeAnnotation reports whether a key is kubeapt's or cenroq's own
+// bookkeeping rather than part of the object under test.
+//
+// The matches are deliberately narrow, which is why cenroq.io/finding and the
+// security.cenroq.io metadata keys are matched exactly rather than by prefix:
+// security.cenroq.io/ is also the namespace of the per-policy enforce, warn and
+// audit labels, which a probe may carry as part of what it tests. Probes in
+// the shipped corpus violate their policy *through* annotations -- an apparmor
+// probe carries container.apparmor.security.beta.kubernetes.io/main and an
+// ingress probe carries nginx.ingress.kubernetes.io/server-snippet -- so
+// stripping anything broader would send a compliant object and report a false
+// pass.
 func isProbeAnnotation(key string) bool {
-	return strings.HasPrefix(key, "analyze.kubeapt.io/") ||
-		strings.HasPrefix(key, "security.kubeapt.io/")
+	if _, ok := cenroqMetadataAnnotations[key]; ok {
+		return true
+	}
+	return key == AnnotationFinding ||
+		strings.HasPrefix(key, "analyze.kubeapt.io/") ||
+		strings.HasPrefix(key, "security.kubeapt.io/") ||
+		strings.HasPrefix(key, "kubeapt.io/")
+}
+
+// cenroqMetadataAnnotations are the security.cenroq.io keys that describe a
+// probe rather than form part of it.
+var cenroqMetadataAnnotations = map[string]struct{}{
+	policies.AnnotationSeverity:    {},
+	policies.AnnotationDisplayName: {},
+	policies.AnnotationDescription: {},
+	policies.AnnotationCategory:    {},
+	policies.AnnotationResource:    {},
+	policies.AnnotationRemediation: {},
+	policies.AnnotationProduct:     {},
 }

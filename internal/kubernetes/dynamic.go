@@ -26,6 +26,9 @@ import (
 // installed.
 var ErrKindNotServed = errors.New("kubernetes: cluster does not serve this kind")
 
+// IsKindNotServed reports whether err means the cluster does not serve a kind.
+func IsKindNotServed(err error) bool { return errors.Is(err, ErrKindNotServed) }
+
 // ResourceClient pairs a dynamic client with a discovery-backed RESTMapper so
 // arbitrary manifests can be addressed without compiled-in type knowledge.
 //
