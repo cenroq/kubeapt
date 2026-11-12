@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -281,7 +282,7 @@ func TestRenderBundleTableSeparatesDeprecatedBlock(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	if err := renderBundleTable(bundles, nil, &buf, table.StyleDefault); err != nil {
+	if err := renderBundleTable(bundles, nil, &buf, table.StyleDefault, true); err != nil {
 		t.Fatalf("renderBundleTable: %v", err)
 	}
 	out := buf.String()
@@ -320,7 +321,7 @@ func TestRenderBundleTableNoLeadingSeparator(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	if err := renderBundleTable(bundles, nil, &buf, table.StyleDefault); err != nil {
+	if err := renderBundleTable(bundles, nil, &buf, table.StyleDefault, true); err != nil {
 		t.Fatalf("renderBundleTable: %v", err)
 	}
 	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
@@ -347,7 +348,7 @@ func TestRenderBundleTableNoSeparatorWhenNoneDeprecated(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	if err := renderBundleTable(bundles, nil, &buf, table.StyleDefault); err != nil {
+	if err := renderBundleTable(bundles, nil, &buf, table.StyleDefault, true); err != nil {
 		t.Fatalf("renderBundleTable: %v", err)
 	}
 	rules := 0
@@ -485,7 +486,7 @@ func TestRenderBundleTableMarksDownloadedAndInstalled(t *testing.T) {
 	installed := map[string]map[string]struct{}{"cenroq-best-practices": {"v0.3.0": {}}}
 
 	var buf bytes.Buffer
-	if err := renderBundleTable(bundles, installed, &buf, table.StyleDefault); err != nil {
+	if err := renderBundleTable(bundles, installed, &buf, table.StyleDefault, true); err != nil {
 		t.Fatalf("renderBundleTable: %v", err)
 	}
 	lines := strings.Split(buf.String(), "\n")
@@ -523,7 +524,7 @@ func TestRenderBundleTableReturnsVersionLookupError(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(bundlesDir, "broken"), []byte("x"), 0o644); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	err := renderBundleTable([]bundleIndexEntry{{Name: "broken"}}, nil, &bytes.Buffer{}, table.StyleDefault)
+	err := renderBundleTable([]bundleIndexEntry{{Name: "broken"}}, nil, &bytes.Buffer{}, table.StyleDefault, false)
 	if err == nil {
 		t.Fatal("expected the version lookup error to be returned")
 	}
@@ -539,5 +540,136 @@ func TestSortBundleEntriesForDisplayOrdersDeprecatedGenerations(t *testing.T) {
 	sortBundleEntriesForDisplay(entries)
 	if entries[0].Deprecated != 1700000000 {
 		t.Fatalf("order = %d, %d; want the older deprecation first", entries[0].Deprecated, entries[1].Deprecated)
+	}
+}
+
+// Without --deprecated the listing has no Deprecated column at all.
+func TestRenderBundleTableHidesDeprecatedColumn(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	bundles := []bundleIndexEntry{
+		{Name: "cenroq-best-practices", LatestVersion: "v0.4.0", Versions: []string{"v0.4.0", "v0.3.0"}},
+	}
+
+	var buf bytes.Buffer
+	if err := renderBundleTable(bundles, nil, &buf, table.StyleDefault, false); err != nil {
+		t.Fatalf("renderBundleTable: %v", err)
+	}
+	out := buf.String()
+	if strings.Contains(out, "DEPRECATED") {
+		t.Fatalf("Deprecated column drawn without --deprecated:\n%s", out)
+	}
+	// Columns are "", Bundle, Origin, Latest, Versions, Downloaded, Installed, "".
+	var header []string
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "BUNDLE") {
+			header = strings.Split(line, "|")
+		}
+	}
+	want := []string{"", "BUNDLE", "ORIGIN", "LATEST", "VERSIONS", "DOWNLOADED", "INSTALLED", ""}
+	if len(header) != len(want) {
+		t.Fatalf("header = %q, want %q", header, want)
+	}
+	for i := range want {
+		if strings.TrimSpace(header[i]) != want[i] {
+			t.Fatalf("header = %q, want %q", header, want)
+		}
+	}
+	if !strings.Contains(out, "v0.3.0") {
+		t.Fatalf("versions missing:\n%s", out)
+	}
+
+	buf.Reset()
+	if err := renderBundleTable(bundles, nil, &buf, table.StyleDefault, true); err != nil {
+		t.Fatalf("renderBundleTable: %v", err)
+	}
+	if !strings.Contains(buf.String(), "DEPRECATED") {
+		t.Fatalf("Deprecated column missing with --deprecated:\n%s", buf.String())
+	}
+}
+
+func TestListableBundles(t *testing.T) {
+	const depTS = int64(1782856800)
+	bundles := []bundleIndexEntry{
+		{Name: "cenroq-best-practices"},
+		{Name: "pod-security-admission"},
+		{Name: "telekom", LocalOnly: true},
+		{Name: "kolteq-best-practices", Deprecated: depTS},
+		{Name: "pod-security-admission", Deprecated: depTS},
+	}
+
+	shown, hidden := listableBundles(bundles, false)
+	var names []string
+	for _, b := range shown {
+		if b.Deprecated != 0 {
+			t.Errorf("deprecated %s listed without --deprecated", b.Name)
+		}
+		names = append(names, b.Name)
+	}
+	if want := []string{"cenroq-best-practices", "pod-security-admission", "telekom"}; !reflect.DeepEqual(names, want) {
+		t.Errorf("shown = %v, want %v", names, want)
+	}
+	if hidden != 2 {
+		t.Errorf("hidden = %d, want 2", hidden)
+	}
+
+	all, hidden := listableBundles(bundles, true)
+	if len(all) != len(bundles) || hidden != 0 {
+		t.Errorf("--deprecated: shown %d hidden %d, want %d and 0", len(all), hidden, len(bundles))
+	}
+}
+
+// The listing pipeline as runBundleList runs it, on an index shaped like the
+// published one. A downloaded bundle the index lists only as deprecated
+// (kolteq-best-practices) is hidden as well, and so is the deprecated
+// duplicate of a current bundle together with the old versions it lists.
+func TestBundleListPipelineHidesDeprecated(t *testing.T) {
+	const depTS = int64(1782856800)
+	remote := []bundleIndexEntry{
+		{Name: "cenroq-best-practices", LatestVersion: "v0.4.0", Versions: []string{"v0.4.0", "v0.3.0"}},
+		{Name: "pod-security-admission", LatestVersion: "v1.37.1", Versions: []string{"v1.37.1", "v1.37.0"}},
+		{Name: "kolteq-best-practices", LatestVersion: "v0.1.1", Versions: []string{"v0.1.1", "v0.1.0"}, Deprecated: depTS},
+		{Name: "pod-security-admission", LatestVersion: "v1.36.0", Versions: []string{"v1.36.0", "v1.34.0"}, Deprecated: depTS},
+	}
+	local := []bundleIndexEntry{
+		{Name: "cenroq-best-practices", Versions: []string{"v0.3.0"}},
+		{Name: "kolteq-best-practices", Versions: []string{"v0.1.1"}},
+		{Name: "pod-security-admission", Versions: []string{"v1.34.0"}},
+		{Name: "telekom", Versions: []string{"v5.0.0"}},
+	}
+
+	run := func(showDeprecated bool) ([]string, int) {
+		bundles := markBundleOrigins(mergeBundleIndexes(remote, local), remote, true)
+		bundles, hidden := listableBundles(bundles, showDeprecated)
+		sortBundleEntriesForDisplay(bundles)
+		var rows []string
+		for _, b := range bundles {
+			// The merge may reorder an entry's versions; only the set matters here.
+			versions := slices.Sorted(slices.Values(b.Versions))
+			row := b.Name + " " + strings.Join(versions, ",")
+			if b.Deprecated != 0 {
+				row += " (deprecated)"
+			}
+			rows = append(rows, row)
+		}
+		return rows, hidden
+	}
+
+	rows, hidden := run(false)
+	want := []string{
+		"cenroq-best-practices v0.3.0,v0.4.0",
+		"pod-security-admission v1.37.0,v1.37.1",
+		"telekom v5.0.0",
+	}
+	if !reflect.DeepEqual(rows, want) || hidden != 2 {
+		t.Errorf("default listing = %v (hidden %d), want %v (hidden 2)", rows, hidden, want)
+	}
+
+	rows, hidden = run(true)
+	want = append(want,
+		"kolteq-best-practices v0.1.0,v0.1.1 (deprecated)",
+		"pod-security-admission v1.34.0,v1.36.0 (deprecated)",
+	)
+	if !reflect.DeepEqual(rows, want) || hidden != 0 {
+		t.Errorf("--deprecated listing = %v (hidden %d), want %v (hidden 0)", rows, hidden, want)
 	}
 }

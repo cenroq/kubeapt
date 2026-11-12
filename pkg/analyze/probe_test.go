@@ -22,10 +22,10 @@ const annotatedProbe = `{
     "annotations": {
       "analyze.kubeapt.io/id": "priv-container",
       "analyze.kubeapt.io/expect": "blocked",
-      "security.kubeapt.io/displayName": "Privileged container",
-      "security.kubeapt.io/description": "Runs a container with full host privileges",
-      "security.kubeapt.io/category": "Workload Escape",
-      "security.kubeapt.io/severity": "Critical",
+      "security.cenroq.io/displayName": "Privileged container",
+      "security.cenroq.io/description": "Runs a container with full host privileges",
+      "security.cenroq.io/category": "Workload Escape",
+      "security.cenroq.io/severity": "Critical",
       "example.com/keep-me": "yes"
     }
   },
@@ -63,7 +63,7 @@ func TestNewProbeReadsMetadata(t *testing.T) {
 
 // A policy is free to match on annotations, so the object on the wire must be
 // the dangerous object and nothing else.
-func TestNewProbeStripsKubeaptAnnotations(t *testing.T) {
+func TestNewProbeStripsOwnAnnotations(t *testing.T) {
 	p, err := analyze.NewProbe(object(t, annotatedProbe), "")
 	if err != nil {
 		t.Fatalf("NewProbe: %v", err)
@@ -71,7 +71,7 @@ func TestNewProbeStripsKubeaptAnnotations(t *testing.T) {
 
 	got := p.Object.GetAnnotations()
 	for key := range got {
-		if strings.HasPrefix(key, "analyze.kubeapt.io/") || strings.HasPrefix(key, "security.kubeapt.io/") {
+		if strings.HasPrefix(key, "analyze.kubeapt.io/") || strings.HasPrefix(key, "security.cenroq.io/") {
 			t.Errorf("annotation %q survived stripping", key)
 		}
 	}
@@ -84,7 +84,7 @@ func TestNewProbeRemovesEmptyAnnotationsBlock(t *testing.T) {
 	raw := `{
 	  "apiVersion": "v1",
 	  "kind": "Pod",
-	  "metadata": {"name": "p", "annotations": {"security.kubeapt.io/severity": "High"}},
+	  "metadata": {"name": "p", "annotations": {"security.cenroq.io/severity": "High"}},
 	  "spec": {}
 	}`
 	p, err := analyze.NewProbe(object(t, raw), "")
@@ -103,7 +103,7 @@ func TestNewProbeDoesNotMutateInput(t *testing.T) {
 	if _, err := analyze.NewProbe(input, ""); err != nil {
 		t.Fatalf("NewProbe: %v", err)
 	}
-	if input.GetAnnotations()["security.kubeapt.io/severity"] != "Critical" {
+	if input.GetAnnotations()["security.cenroq.io/severity"] != "Critical" {
 		t.Fatal("NewProbe mutated the caller's object")
 	}
 }
@@ -335,18 +335,22 @@ func TestNewProbeReadsFindingID(t *testing.T) {
 
 // Shipped probes violate their policy *through* annotations. Stripping one of
 // those would submit a compliant object and report a false pass, so only
-// kubeapt's own prefixes and the exact cenroq.io/finding key may go: other
-// cenroq.io annotations belong to the object under test.
+// kubeapt's own prefixes and the exact cenroq keys may go: other cenroq.io and
+// security.cenroq.io annotations belong to the object under test.
 func TestNewProbeKeepsViolatingAnnotations(t *testing.T) {
 	raw := `{"apiVersion":"v1","kind":"Pod","metadata":{"name":"p","annotations":{
 	  "container.apparmor.security.beta.kubernetes.io/main": "unconfined",
 	  "nginx.ingress.kubernetes.io/server-snippet": "return 200;",
 	  "cenroq.io/owner": "team-a",
 	  "pss.security.cenroq.io/enforce": "restricted",
+	  "security.cenroq.io/enforce": "disabled",
 	  "cenroq.io/finding": "oq-0276",
 	  "kubeapt.io/uuid": "u",
 	  "analyze.kubeapt.io/id": "i",
-	  "security.kubeapt.io/severity": "High"
+	  "security.cenroq.io/severity": "High",
+	  "security.cenroq.io/product": "kubernetes",
+	  "security.kubeapt.io/severity": "High",
+	  "security.kubeapt.io/remediation": "fix it"
 	}}}`
 	p, err := analyze.NewProbe(object(t, raw), "")
 	if err != nil {
@@ -358,6 +362,7 @@ func TestNewProbeKeepsViolatingAnnotations(t *testing.T) {
 		"nginx.ingress.kubernetes.io/server-snippet":          "return 200;",
 		"cenroq.io/owner":                "team-a",
 		"pss.security.cenroq.io/enforce": "restricted",
+		"security.cenroq.io/enforce":     "disabled",
 	}
 	if len(got) != len(want) {
 		t.Fatalf("annotations = %v, want %v", got, want)
@@ -366,5 +371,70 @@ func TestNewProbeKeepsViolatingAnnotations(t *testing.T) {
 		if got[key] != value {
 			t.Errorf("annotation %s = %q, want %q", key, got[key], value)
 		}
+	}
+}
+
+// Probe metadata reads security.cenroq.io first and falls back to the legacy
+// security.kubeapt.io keys, reporting the fallback so the CLI can warn.
+func TestNewProbeReadsLegacyMetadata(t *testing.T) {
+	tests := []struct {
+		name           string
+		annotations    string
+		wantTitle      string
+		wantSeverity   types.Severity
+		wantCategory   string
+		wantDeprecated bool
+	}{
+		{
+			name:         "cenroq keys",
+			annotations:  `"security.cenroq.io/displayName":"New","security.cenroq.io/severity":"High","security.cenroq.io/category":"Escape"`,
+			wantTitle:    "New",
+			wantSeverity: types.SeverityHigh,
+			wantCategory: "Escape",
+		},
+		{
+			name:           "legacy keys",
+			annotations:    `"security.kubeapt.io/displayName":"Old","security.kubeapt.io/severity":"Low","security.kubeapt.io/category":"Old Cat"`,
+			wantTitle:      "Old",
+			wantSeverity:   types.SeverityLow,
+			wantCategory:   "Old Cat",
+			wantDeprecated: true,
+		},
+		{
+			name: "cenroq wins over legacy",
+			annotations: `"security.cenroq.io/displayName":"New","security.kubeapt.io/displayName":"Old",` +
+				`"security.cenroq.io/severity":"Critical","security.kubeapt.io/severity":"Low"`,
+			wantTitle:    "New",
+			wantSeverity: types.SeverityCritical,
+		},
+		{
+			name:           "legacy fills a gap the cenroq keys leave",
+			annotations:    `"security.cenroq.io/displayName":"New","security.kubeapt.io/severity":"Moderate"`,
+			wantTitle:      "New",
+			wantSeverity:   types.SeverityModerate,
+			wantDeprecated: true,
+		},
+		{
+			name:         "kyverno title but never kyverno severity",
+			annotations:  `"policies.kyverno.io/title":"Kyverno","policies.kyverno.io/severity":"high"`,
+			wantTitle:    "Kyverno",
+			wantSeverity: types.SeverityNotRated,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := `{"apiVersion":"v1","kind":"Pod","metadata":{"name":"p","annotations":{` + tc.annotations + `}}}`
+			p, err := analyze.NewProbe(object(t, raw), "")
+			if err != nil {
+				t.Fatalf("NewProbe: %v", err)
+			}
+			if p.DisplayName != tc.wantTitle || p.Severity != tc.wantSeverity || p.Category != tc.wantCategory {
+				t.Errorf("DisplayName %q Severity %q Category %q, want %q %q %q",
+					p.DisplayName, p.Severity, p.Category, tc.wantTitle, tc.wantSeverity, tc.wantCategory)
+			}
+			if p.DeprecatedAnnotations != tc.wantDeprecated {
+				t.Errorf("DeprecatedAnnotations = %v, want %v", p.DeprecatedAnnotations, tc.wantDeprecated)
+			}
+		})
 	}
 }

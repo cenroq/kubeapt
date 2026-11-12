@@ -54,11 +54,15 @@ type PolicyRef struct {
 	// DeprecatedID reports that FindingID was read from the deprecated
 	// kubeapt.io/uuid annotation rather than cenroq.io/finding.
 	DeprecatedID bool
-	Name         string
-	DisplayName  string
-	Description  string
-	Severity     types.Severity
-	URL          string
+	// DeprecatedAnnotations reports that some of the policy's metadata was
+	// read from a deprecated security.kubeapt.io annotation rather than its
+	// security.cenroq.io replacement.
+	DeprecatedAnnotations bool
+	Name                  string
+	DisplayName           string
+	Description           string
+	Severity              types.Severity
+	URL                   string
 }
 
 // LoadPolicyIndex reads a bundle's policies.yaml and indexes it by finding id,
@@ -84,13 +88,14 @@ func LoadPolicyIndex(fsys fs.FS, name string) (map[string]PolicyRef, error) {
 			continue
 		}
 		index[id] = PolicyRef{
-			FindingID:    id,
-			DeprecatedID: deprecated,
-			Name:         policy.Name,
-			DisplayName:  policies.LookupAnnotation(policy.Annotations, policies.AnnotationDisplayName, policies.KyvernoAnnotationTitle),
-			Description:  policies.LookupAnnotation(policy.Annotations, policies.AnnotationDescription, policies.KyvernoAnnotationDescription),
-			Severity:     policies.NormalizeSeverity(policy.Annotations[policies.AnnotationSeverity]),
-			URL:          policies.DocsURL(id),
+			FindingID:             id,
+			DeprecatedID:          deprecated,
+			DeprecatedAnnotations: policies.UsesLegacyAnnotations(policy.Annotations),
+			Name:                  policy.Name,
+			DisplayName:           policies.DisplayNameFromAnnotations(policy.Annotations),
+			Description:           policies.DescriptionFromAnnotations(policy.Annotations),
+			Severity:              policies.SeverityFromAnnotations(policy.Annotations),
+			URL:                   policies.DocsURL(id),
 		}
 	}
 	return index, nil

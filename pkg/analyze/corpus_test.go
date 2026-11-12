@@ -49,9 +49,9 @@ metadata:
   name: pod-hostpid
   annotations:
     cenroq.io/finding: "` + testFinding + `"
-    security.kubeapt.io/displayName: "Shares the Host PID Namespace"
-    security.kubeapt.io/description: "Exposes every process on the node."
-    security.kubeapt.io/severity: "High"
+    security.cenroq.io/displayName: "Shares the Host PID Namespace"
+    security.cenroq.io/description: "Exposes every process on the node."
+    security.cenroq.io/severity: "High"
 `
 
 func bundleFS() fstest.MapFS {
@@ -240,7 +240,7 @@ kind: ValidatingAdmissionPolicy
 metadata:
   name: no-finding
   annotations:
-    security.kubeapt.io/severity: "High"
+    security.cenroq.io/severity: "High"
 `)}}
 	index, err := LoadPolicyIndex(fsys, "policies.yaml")
 	if err != nil {
@@ -288,7 +288,7 @@ metadata:
     cenroq.io/finding: " ` + testFinding + ` "
     policies.kyverno.io/title: "Disallow Host PID"
     policies.kyverno.io/description: "From Kyverno."
-    security.kubeapt.io/severity: "critical"
+    security.cenroq.io/severity: "critical"
 `)}}
 	index, err := LoadPolicyIndex(fsys, "policies.yaml")
 	if err != nil {
@@ -606,5 +606,53 @@ metadata:
 	}
 	if ref.DeprecatedID {
 		t.Error("an id read from cenroq.io/finding was flagged deprecated")
+	}
+}
+
+// Policy sets published before the switch carry their metadata under
+// security.kubeapt.io. The index must still read it, and flag it so the CLI
+// can warn that the bundle needs replacing.
+func TestLoadPolicyIndexReadsLegacyMetadata(t *testing.T) {
+	fsys := fstest.MapFS{"policies.yaml": {Data: []byte(`apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: legacy
+  annotations:
+    cenroq.io/finding: "oq-0001"
+    security.kubeapt.io/displayName: "Old name"
+    security.kubeapt.io/description: "Old description."
+    security.kubeapt.io/severity: "Moderate"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: both
+  annotations:
+    cenroq.io/finding: "oq-0002"
+    security.cenroq.io/displayName: "New name"
+    security.cenroq.io/description: "New description."
+    security.cenroq.io/severity: "Critical"
+    security.kubeapt.io/displayName: "Old name"
+    security.kubeapt.io/severity: "Low"
+`)}}
+	index, err := LoadPolicyIndex(fsys, "policies.yaml")
+	if err != nil {
+		t.Fatalf("LoadPolicyIndex: %v", err)
+	}
+
+	legacy := index["oq-0001"]
+	if legacy.DisplayName != "Old name" || legacy.Description != "Old description." || legacy.Severity != types.SeverityModerate {
+		t.Errorf("legacy ref = %+v, want the security.kubeapt.io values", legacy)
+	}
+	if !legacy.DeprecatedAnnotations {
+		t.Error("legacy ref: DeprecatedAnnotations = false, want true")
+	}
+
+	both := index["oq-0002"]
+	if both.DisplayName != "New name" || both.Description != "New description." || both.Severity != types.SeverityCritical {
+		t.Errorf("both ref = %+v, want the security.cenroq.io values", both)
+	}
+	if both.DeprecatedAnnotations {
+		t.Error("both ref: DeprecatedAnnotations = true although every legacy value is shadowed")
 	}
 }

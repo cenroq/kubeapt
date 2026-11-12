@@ -314,7 +314,7 @@ kind: Pod
 metadata:
   name: %s
   annotations:
-    security.kubeapt.io/severity: High
+    security.cenroq.io/severity: High
 spec:
 %s  containers:
   - name: main
@@ -665,6 +665,40 @@ func TestAnalyzeWarnsAboutLegacyUUIDBundle(t *testing.T) {
 			got := envelope.Results.Results[0]
 			if got.Finding != tc.wantID || got.Policy != "pod-hostpid" || got.URL != policies.DocsURL(tc.wantID) {
 				t.Errorf("finding %q policy %q url %q", got.Finding, got.Policy, got.URL)
+			}
+		})
+	}
+}
+
+// A bundle published before the switch to security.cenroq.io still names and
+// rates its probes, and says once that it needs replacing.
+// A bundle published before the switch to security.cenroq.io keeps its names
+// and severities, without a warning: the note is debug level only for now.
+func TestAnalyzeReadsLegacyAnnotationBundleQuietly(t *testing.T) {
+	cluster := newFakeCluster(t)
+	isolateCluster(t, cluster.kubeconfig(""))
+
+	tests := []struct {
+		name     string
+		policies string
+	}{
+		{"legacy annotation bundle", strings.ReplaceAll(bundlePolicyYAML, "security.cenroq.io/", "security.kubeapt.io/")},
+		{"cenroq annotation bundle", bundlePolicyYAML},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := writeProbeDir(t, map[string]string{"policies.yaml": tc.policies, "probes/deny.yaml": bundleDenyYAML})
+
+			envelope, stderr, err := runAnalyzeJSONWithLog(t, "--probes", dir, "--namespaces", "a")
+			if err != nil {
+				t.Fatalf("analyze: %v", err)
+			}
+			if strings.Contains(stderr, "deprecated security.kubeapt.io/*") {
+				t.Fatalf("deprecation note printed at the default level; stderr:\n%s", stderr)
+			}
+			got := envelope.Results.Results[0]
+			if got.DisplayName != "Shares the Host PID Namespace" || got.Severity != "High" {
+				t.Errorf("displayName %q severity %q, want the policy's metadata either way", got.DisplayName, got.Severity)
 			}
 		})
 	}

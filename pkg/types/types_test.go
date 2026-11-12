@@ -47,3 +47,17 @@ func TestSeverityConstantValues(t *testing.T) {
 		}
 	}
 }
+
+// TestOutcomeConstantValues pins the wire values of Outcome constants.
+func TestOutcomeConstantValues(t *testing.T) {
+	cases := map[types.Outcome]string{
+		types.OutcomePass:  "pass",
+		types.OutcomeFail:  "fail",
+		types.OutcomeError: "error",
+	}
+	for outcome, want := range cases {
+		if string(outcome) != want {
+			t.Errorf("Outcome = %q, want %q", string(outcome), want)
+		}
+	}
+}

@@ -113,6 +113,7 @@ func runAnalyze(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	warnDeprecatedIDs(probes)
+	logDeprecatedAnnotations(probes)
 	probes, err = filterProbes(probes, request.probeIDs)
 	if err != nil {
 		return err
@@ -315,6 +316,33 @@ func warnDeprecatedIDs(probes []analyze.Probe) {
 		logging.Warnf("%d probe(s) are identified by the deprecated %s annotation; future policy sets use only %s. Re-download the bundle once a newer version is published",
 			deprecated, policies.AnnotationUUID, policies.AnnotationFinding)
 	}
+}
+
+// logDeprecatedAnnotations logs once, not per probe, when probe metadata is
+// still read from the deprecated security.kubeapt.io annotations. Names and
+// severities still resolve through the fallback.
+//
+// Debug level only, for the reason logDeprecatedPolicyAnnotations gives.
+func logDeprecatedAnnotations(probes []analyze.Probe) {
+	if note := deprecatedAnnotationsNote(probes); note != "" {
+		logging.Debugf("%s", note)
+	}
+}
+
+// deprecatedAnnotationsNote is the line logDeprecatedAnnotations logs, or ""
+// when no probe reads the deprecated annotations.
+func deprecatedAnnotationsNote(probes []analyze.Probe) string {
+	deprecated := 0
+	for _, probe := range probes {
+		if probe.DeprecatedAnnotations || (probe.Policy != nil && probe.Policy.DeprecatedAnnotations) {
+			deprecated++
+		}
+	}
+	if deprecated == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%d probe(s) take their metadata from the deprecated %s annotations; newer policy sets use %s",
+		deprecated, legacyAnnotationFamily, cenroqAnnotationFamily)
 }
 
 func filterProbes(probes []analyze.Probe, ids []string) ([]analyze.Probe, error) {

@@ -19,6 +19,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -94,14 +95,16 @@ func newBundleDownloadCmd() *cobra.Command {
 
 func newBundleListCmd() *cobra.Command {
 	var local bool
+	var deprecated bool
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List available policy bundles and versions",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runBundleList(cmd, local)
+			return runBundleList(cmd, local, deprecated)
 		},
 	}
 	cmd.Flags().BoolVar(&local, "local", false, "List only locally downloaded bundles")
+	cmd.Flags().BoolVar(&deprecated, "deprecated", false, "Also list deprecated bundles, with the date each was deprecated")
 	return cmd
 }
 
@@ -448,7 +451,7 @@ func runBundleDownload(cmd *cobra.Command, bundleName, version string) error {
 	return nil
 }
 
-func runBundleList(cmd *cobra.Command, local bool) error {
+func runBundleList(cmd *cobra.Command, local, showDeprecated bool) error {
 	var bundles []bundleIndexEntry
 	var err error
 	var remoteBundles []bundleIndexEntry
@@ -474,9 +477,11 @@ func runBundleList(cmd *cobra.Command, local bool) error {
 	}
 
 	bundles = markBundleOrigins(bundles, remoteBundles, remoteErr == nil)
+	bundles, hidden := listableBundles(bundles, showDeprecated)
 
 	if len(bundles) == 0 {
 		logging.Infof("No bundles found.")
+		logHiddenDeprecated(hidden)
 		return nil
 	}
 
@@ -496,22 +501,52 @@ func runBundleList(cmd *cobra.Command, local bool) error {
 		installedIndex = index
 	}
 
-	if err := renderBundleTable(bundles, installedIndex, logging.Writer(), table.StyleRounded); err != nil {
+	if err := renderBundleTable(bundles, installedIndex, logging.Writer(), table.StyleRounded, showDeprecated); err != nil {
 		return err
 	}
 	logging.Newline()
 	logging.Infof("Legend: x = version is downloaded/installed")
+	logHiddenDeprecated(hidden)
 
 	return nil
 }
 
+// listableBundles drops the deprecated entries unless showDeprecated is set,
+// and reports how many it dropped. It runs after markBundleOrigins, so a
+// downloaded bundle that the index lists only as deprecated is dropped too.
+// The deprecated versions stay downloadable; they are only left out of the
+// listing.
+func listableBundles(bundles []bundleIndexEntry, showDeprecated bool) ([]bundleIndexEntry, int) {
+	if showDeprecated {
+		return bundles, 0
+	}
+	shown := make([]bundleIndexEntry, 0, len(bundles))
+	for _, bundle := range bundles {
+		if bundle.Deprecated == 0 {
+			shown = append(shown, bundle)
+		}
+	}
+	return shown, len(bundles) - len(shown)
+}
+
+func logHiddenDeprecated(hidden int) {
+	if hidden > 0 {
+		logging.Infof("%d deprecated bundle(s) not shown; pass --deprecated to list them", hidden)
+	}
+}
+
 // renderBundleTable writes the listing. bundles must already be in display
-// order, which is what decides where the deprecated rule falls.
-func renderBundleTable(bundles []bundleIndexEntry, installedIndex map[string]map[string]struct{}, w io.Writer, style table.Style) error {
+// order, which is what decides where the deprecated rule falls. The Deprecated
+// column is drawn only when showDeprecated is set.
+func renderBundleTable(bundles []bundleIndexEntry, installedIndex map[string]map[string]struct{}, w io.Writer, style table.Style, showDeprecated bool) error {
 	t := table.NewWriter()
 	t.SetOutputMirror(w)
 	t.SetStyle(style)
-	t.AppendHeader(table.Row{"Bundle", "Origin", "Latest", "Deprecated", "Versions", "Downloaded", "Installed"})
+	header := table.Row{"Bundle", "Origin", "Latest", "Deprecated", "Versions", "Downloaded", "Installed"}
+	if !showDeprecated {
+		header = slices.Delete(header, 3, 4)
+	}
+	t.AppendHeader(header)
 
 	// sortBundleEntriesForDisplay has grouped the deprecated entries last; a
 	// rule at the boundary makes that grouping visible rather than something
@@ -576,7 +611,11 @@ func renderBundleTable(bundles []bundleIndexEntry, installedIndex map[string]map
 			downloaded = strings.Join(downloadedLines, "\n")
 			installed = strings.Join(installedLines, "\n")
 		}
-		t.AppendRow(table.Row{bundle.Name, origin, latest, deprecated, versions, downloaded, installed})
+		row := table.Row{bundle.Name, origin, latest, deprecated, versions, downloaded, installed}
+		if !showDeprecated {
+			row = slices.Delete(row, 3, 4)
+		}
+		t.AppendRow(row)
 	}
 	t.Render()
 	return nil
@@ -1528,7 +1567,7 @@ func validateBundleSegment(label, value string) error {
 	if strings.ContainsAny(value, `/\`) {
 		return fmt.Errorf("%s contains invalid path separators", label)
 	}
-	if value != filepath.Base(value) {
+	if value != filepath.Base(value) || value == "." || value == ".." {
 		return fmt.Errorf("%s contains invalid path elements", label)
 	}
 	return nil

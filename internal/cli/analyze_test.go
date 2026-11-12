@@ -28,8 +28,8 @@ metadata:
   name: privileged-probe
   annotations:
     analyze.kubeapt.io/id: privileged-container
-    security.kubeapt.io/displayName: Privileged container
-    security.kubeapt.io/severity: Critical
+    security.cenroq.io/displayName: Privileged container
+    security.cenroq.io/severity: Critical
 spec:
   containers:
     - name: app
@@ -43,7 +43,7 @@ kind: Pod
 metadata:
   name: hostpath-probe
   annotations:
-    security.kubeapt.io/severity: High
+    security.cenroq.io/severity: High
 spec:
   containers:
     - name: app
@@ -77,8 +77,8 @@ metadata:
   name: pod-hostpid
   annotations:
     cenroq.io/finding: "` + bundleFinding + `"
-    security.kubeapt.io/displayName: "Shares the Host PID Namespace"
-    security.kubeapt.io/severity: "High"
+    security.cenroq.io/displayName: "Shares the Host PID Namespace"
+    security.cenroq.io/severity: "High"
 `
 
 // The banner and the "# policy:" header mirror a real bundle's probes/deny.yaml,
@@ -238,7 +238,7 @@ func TestLoadProbesFromDirectory(t *testing.T) {
 		t.Errorf("display name = %q", probes[1].DisplayName)
 	}
 	// kubeapt's own annotations must not reach the API server.
-	if _, present := probes[1].Object.GetAnnotations()["security.kubeapt.io/severity"]; present {
+	if _, present := probes[1].Object.GetAnnotations()["security.cenroq.io/severity"]; present {
 		t.Error("probe annotations were not stripped")
 	}
 }
@@ -894,5 +894,29 @@ func TestWarnDeprecatedIDs(t *testing.T) {
 	warnDeprecatedIDs([]analyze.Probe{{ID: "clean", FindingID: "oq-0276"}})
 	if log.Len() != 0 {
 		t.Errorf("clean corpus warned: %q", log.String())
+	}
+}
+
+func TestDeprecatedAnnotationsNote(t *testing.T) {
+	probes := []analyze.Probe{
+		{ID: "own", DeprecatedAnnotations: true},
+		{ID: "policy", Policy: &analyze.PolicyRef{DeprecatedAnnotations: true}},
+		{ID: "clean", Policy: &analyze.PolicyRef{}},
+		{ID: "unjoined"},
+	}
+	note := deprecatedAnnotationsNote(probes)
+	if !strings.HasPrefix(note, "2 probe(s)") || !strings.Contains(note, "deprecated security.kubeapt.io/*") ||
+		!strings.Contains(note, "security.cenroq.io/*") {
+		t.Errorf("note = %q", note)
+	}
+	if note := deprecatedAnnotationsNote([]analyze.Probe{{ID: "clean", Policy: &analyze.PolicyRef{}}}); note != "" {
+		t.Errorf("clean corpus note = %q, want none", note)
+	}
+
+	// Debug level only: at the default level nothing is printed.
+	log := captureLog(t)
+	logDeprecatedAnnotations(probes)
+	if log.Len() != 0 {
+		t.Errorf("logged at the default level: %q", log.String())
 	}
 }

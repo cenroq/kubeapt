@@ -76,7 +76,10 @@ func runBundleImport(cmd *cobra.Command, from, checksum string, force bool) erro
 	if err != nil {
 		return err
 	}
-	bundleName := strings.TrimSpace(manifest.Name)
+	bundleName, err := importBundleName(from, manifest)
+	if err != nil {
+		return err
+	}
 	bundleVersion := strings.TrimSpace(manifest.Version)
 	if err := validateBundleSegment("bundle name", bundleName); err != nil {
 		return fmt.Errorf("archive bundle.json: %w", err)
@@ -173,7 +176,7 @@ func runBundleExport(cmd *cobra.Command, bundleName, version, output string) err
 		}
 	}
 
-	if err := packBundleArchive(sourceDir, output); err != nil {
+	if err := packBundleArchive(sourceDir, bundleName, output); err != nil {
 		return fmt.Errorf("pack archive %s: %w", output, err)
 	}
 	checksumPath := output + ".sha256"
@@ -219,6 +222,24 @@ func sha256File(path string) (string, error) {
 	return hex.EncodeToString(hasher.Sum(nil)), nil
 }
 
+// importBundleName returns the name a bundle archive installs under, the one
+// `bundles download` and --bundle use (cenroq-best-practices).
+//
+// Release archives and the ones `bundles export` writes keep every file below
+// a single root directory with that name. bundle.json's name is the display
+// name ("cenroq Best Practices"), so it is only the fallback, for flat archives
+// written by kubeapt releases before the export gained its root directory.
+func importBundleName(archivePath string, manifest bundleManifest) (string, error) {
+	root, err := detectTarRoot(archivePath)
+	if err != nil {
+		return "", fmt.Errorf("read archive %s: %w", archivePath, err)
+	}
+	if root != "" && validateBundleSegment("bundle name", root) == nil {
+		return root, nil
+	}
+	return strings.TrimSpace(manifest.Name), nil
+}
+
 // readBundleManifestFromArchive parses bundle.json from the tarball without unpacking.
 func readBundleManifestFromArchive(archivePath string) (bundleManifest, error) {
 	f, err := os.Open(archivePath)
@@ -257,7 +278,10 @@ func readBundleManifestFromArchive(archivePath string) (bundleManifest, error) {
 	return bundleManifest{}, errors.New("archive does not contain bundle.json")
 }
 
-func packBundleArchive(sourceDir, output string) error {
+// packBundleArchive writes the bundle's files below a <bundleName>/ root
+// directory, the layout of release archives, so that importing the archive
+// installs it under the same name again.
+func packBundleArchive(sourceDir, bundleName, output string) error {
 	out, err := os.Create(output)
 	if err != nil {
 		return err
@@ -276,7 +300,7 @@ func packBundleArchive(sourceDir, output string) error {
 			return err
 		}
 		hdr := &tar.Header{
-			Name:     name,
+			Name:     bundleName + "/" + name,
 			Mode:     0o644,
 			Size:     int64(len(data)),
 			Typeflag: tar.TypeReg,
