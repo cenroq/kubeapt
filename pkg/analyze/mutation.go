@@ -28,6 +28,11 @@ import (
 // API server canonicalises them: a manifest asking for "1000m" comes back as
 // "1". Without that, every probe carrying a resources block would report as
 // mutated and the Mutated outcome would stop meaning anything.
+//
+// Empty values are treated the same way. The API server serialises with
+// omitempty, so a field the manifest set to "" (seLinuxOptions.user, for
+// example) comes back absent. Counting that as a mutation would downgrade an
+// admitted, unchanged violation from Fail to Warn.
 func DiffSetPaths(submitted, returned *unstructured.Unstructured) []string {
 	if submitted == nil || returned == nil {
 		return nil
@@ -49,6 +54,9 @@ func diffMap(prefix string, want, got map[string]any, changed *[]string) {
 		}
 		gotValue, ok := got[key]
 		if !ok {
+			if isEmptyValue(wantValue) {
+				continue
+			}
 			*changed = append(*changed, path)
 			continue
 		}
@@ -85,6 +93,32 @@ func diffValue(path string, want, got any, changed *[]string) {
 			*changed = append(*changed, path)
 		}
 	}
+}
+
+// isEmptyValue reports whether v is a value omitempty drops on the wire: nil,
+// an empty string, an empty list, or a map whose entries are all themselves
+// empty.
+//
+// false and 0 are deliberately not empty. Most security booleans are pointers
+// (privileged, runAsNonRoot), which the API server keeps when set to false, so
+// one of those disappearing is a real change.
+func isEmptyValue(v any) bool {
+	switch typed := v.(type) {
+	case nil:
+		return true
+	case string:
+		return typed == ""
+	case map[string]any:
+		for _, inner := range typed {
+			if !isEmptyValue(inner) {
+				return false
+			}
+		}
+		return true
+	case []any:
+		return len(typed) == 0
+	}
+	return false
 }
 
 // ignoredPath drops fields whose divergence is never a mutation. status is

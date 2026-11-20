@@ -153,6 +153,31 @@ func TestDiffSetPathsDetectsRemovedField(t *testing.T) {
 	}
 }
 
+// The API server serialises with omitempty, so empty values the probe set come
+// back absent. This is the shape of the initcontainer-read-only-root-filesystem
+// probe: its real violation is admitted untouched and must stay a Fail, not
+// turn into a Warn because its empty seLinuxOptions strings were dropped.
+func TestDiffSetPathsIgnoresOmittedEmptyValues(t *testing.T) {
+	submitted := object(t, `{"spec":{"initContainers":[{"securityContext":{"readOnlyRootFilesystem":false,"seLinuxOptions":{"user":"","role":"","type":""}}}],"tolerations":[],"nodeSelector":{}}}`)
+	returned := object(t, `{"spec":{"initContainers":[{"securityContext":{"readOnlyRootFilesystem":false,"seLinuxOptions":{}}}]}}`)
+
+	if got := analyze.DiffSetPaths(submitted, returned); len(got) != 0 {
+		t.Fatalf("omitted empty values reported as mutation: %v", got)
+	}
+}
+
+// Only empty values are exempt. A non-empty value or a false boolean that
+// disappears was removed by something, and that is still a mutation.
+func TestDiffSetPathsDetectsRemovedNonEmptyValues(t *testing.T) {
+	submitted := object(t, `{"spec":{"securityContext":{"seLinuxOptions":{"type":"spc_t"}},"containers":[{"securityContext":{"privileged":false}}]}}`)
+	returned := object(t, `{"spec":{"securityContext":{"seLinuxOptions":{}},"containers":[{"securityContext":{}}]}}`)
+
+	want := []string{"spec.containers[0].securityContext.privileged", "spec.securityContext.seLinuxOptions.type"}
+	if got := analyze.DiffSetPaths(submitted, returned); !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
 func TestDiffSetPathsDetectsTruncatedSlice(t *testing.T) {
 	submitted := object(t, `{"spec":{"volumes":[{"name":"a","hostPath":{"path":"/"}},{"name":"b"}]}}`)
 	returned := object(t, `{"spec":{"volumes":[{"name":"a","hostPath":{"path":"/"}}]}}`)
