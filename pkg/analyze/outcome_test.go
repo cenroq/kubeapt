@@ -138,6 +138,94 @@ func TestClassifyQuotaDenialIsInconclusiveNotBlocked(t *testing.T) {
 	}
 }
 
+// RBAC escalation prevention answers 403 when a probe grants permissions the
+// caller does not hold. The create preflight cannot see that, and the probe was
+// never evaluated by admission, so it must not count as a block.
+func TestClassifyRBACEscalationIsInconclusiveNotBlocked(t *testing.T) {
+	p := probe(t, analyze.ExpectBlocked)
+	err := apierrors.NewForbidden(
+		schema.GroupResource{Group: "rbac.authorization.k8s.io", Resource: "clusterroles"}, "probe",
+		errors.New(`user "system:serviceaccount:ci:kubeapt" (groups=["system:serviceaccounts"]) is attempting to grant RBAC permissions not currently held:
+{APIGroups:["*"], Resources:["*"], Verbs:["*"]}`),
+	)
+
+	got := analyze.Classify(p, "", p.Object, nil, err)
+	if got.Outcome != analyze.OutcomeInconclusive {
+		t.Fatalf("outcome = %s, want Inconclusive", got.Outcome)
+	}
+	if got.Reason != analyze.ReasonRBAC {
+		t.Fatalf("reason = %s, want rbac", got.Reason)
+	}
+	if got.Verdict == analyze.VerdictPass {
+		t.Fatal("RBAC escalation refusal must not read as a pass")
+	}
+}
+
+// Only cluster-admin may create a ClusterRole with an aggregationRule; for any
+// other caller that is the same kind of authorization refusal.
+func TestClassifyAggregationRuleRefusalIsInconclusive(t *testing.T) {
+	p := probe(t, analyze.ExpectBlocked)
+	err := apierrors.NewForbidden(
+		schema.GroupResource{Group: "rbac.authorization.k8s.io", Resource: "clusterroles"}, "probe",
+		errors.New("must have cluster-admin privileges to use the aggregationRule"),
+	)
+
+	got := analyze.Classify(p, "", p.Object, nil, err)
+	if got.Outcome != analyze.OutcomeInconclusive || got.Reason != analyze.ReasonRBAC {
+		t.Fatalf("got %s/%s, want Inconclusive/rbac", got.Outcome, got.Reason)
+	}
+}
+
+// NamespaceLifecycle refuses every create in a terminating namespace with 403.
+func TestClassifyTerminatingNamespaceIsInconclusive(t *testing.T) {
+	p := probe(t, analyze.ExpectBlocked)
+	err := apierrors.NewForbidden(
+		schema.GroupResource{Resource: "pods"}, "probe",
+		errors.New("unable to create new content in namespace team-a because it is being terminated"),
+	)
+
+	got := analyze.Classify(p, "team-a", p.Object, nil, err)
+	if got.Outcome != analyze.OutcomeInconclusive {
+		t.Fatalf("outcome = %s, want Inconclusive", got.Outcome)
+	}
+	if got.Reason != analyze.ReasonNamespaceTerminating {
+		t.Fatalf("reason = %s, want namespace-terminating", got.Reason)
+	}
+}
+
+// The non-admission patterns are only a fallback. A policy whose message
+// happens to use the same words is still the enforcer, and still a block.
+func TestClassifyAttributedDenialOutranksNonAdmissionWording(t *testing.T) {
+	p := probe(t, analyze.ExpectBlocked)
+	err := apierrors.NewForbidden(
+		schema.GroupResource{Resource: "pods"}, "probe",
+		errors.New("ValidatingAdmissionPolicy 'no-orphans' with binding 'no-orphans-binding' denied request: pods are refused because it is being terminated"),
+	)
+
+	got := analyze.Classify(p, "default", p.Object, nil, err)
+	if got.Outcome != analyze.OutcomeBlocked {
+		t.Fatalf("outcome = %s, want Blocked", got.Outcome)
+	}
+	if got.Enforcer.Type != analyze.EnforcerVAP {
+		t.Fatalf("enforcer = %s, want ValidatingAdmissionPolicy", got.Enforcer.Type)
+	}
+}
+
+// Other unattributed denials keep their existing reading: a block whose
+// enforcer is reported as unattributed with the raw message retained.
+func TestClassifyOtherUnattributedDenialStaysBlocked(t *testing.T) {
+	p := probe(t, analyze.ExpectBlocked)
+	err := apierrors.NewForbidden(
+		schema.GroupResource{Resource: "pods"}, "probe",
+		errors.New("denied by a component kubeapt does not recognise"),
+	)
+
+	got := analyze.Classify(p, "default", p.Object, nil, err)
+	if got.Outcome != analyze.OutcomeBlocked || got.Enforcer.Type != analyze.EnforcerUnattributed {
+		t.Fatalf("got %s/%s, want Blocked/Unattributed", got.Outcome, got.Enforcer.Type)
+	}
+}
+
 func TestClassifyInvalidIsABlock(t *testing.T) {
 	p := probe(t, analyze.ExpectBlocked)
 	err := apierrors.NewInvalid(
