@@ -6,9 +6,11 @@ package kubernetes
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
+	"k8s.io/apimachinery/pkg/api/validate/content"
 	"k8s.io/client-go/kubernetes"
 )
 
@@ -102,6 +104,36 @@ func extractPrimaryResources(resources []string) []string {
 	return out
 }
 
+// validateRuleSegments rejects resourceRules values that cannot be a single
+// URL path segment.
+//
+// draftURLs joins these values straight into a request path, and the REST
+// client cleans that path before sending it. A policy file with an apiGroup of
+// "../api/v1/nodes/<node>/proxy" would therefore turn a list call into a node
+// proxy request made with the operator's credentials. The API server never
+// accepts such a value in a real ValidatingAdmissionPolicy, so it can only come
+// from a local file, and rejecting it outright is safer than skipping it.
+//
+// "" (the core group) and "*" (expanded through discovery) remain valid.
+func validateRuleSegments(apiGroups, apiVersions, resources []string) error {
+	fields := []struct {
+		name   string
+		values []string
+	}{
+		{"apiGroups", apiGroups},
+		{"apiVersions", apiVersions},
+		{"resources", resources},
+	}
+	for _, field := range fields {
+		for _, value := range field.values {
+			if msgs := content.IsPathSegmentName(value); len(msgs) > 0 {
+				return fmt.Errorf("invalid resourceRules %s value %q: %s", field.name, value, strings.Join(msgs, ", "))
+			}
+		}
+	}
+	return nil
+}
+
 type kubernetesQueryURL struct {
 	apiGroup    string
 	apiVersions []string
@@ -109,6 +141,10 @@ type kubernetesQueryURL struct {
 }
 
 func draftURLs(clientset *kubernetes.Clientset, apiGroups, apiVersions, resources []string) ([]string, error) {
+	if err := validateRuleSegments(apiGroups, apiVersions, resources); err != nil {
+		return nil, err
+	}
+
 	urlDrafts := make([]kubernetesQueryURL, 0)
 
 	// Handle wildcard case "*" for apiGroups
