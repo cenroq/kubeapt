@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/url"
 	"os"
@@ -1292,6 +1293,14 @@ func deployBundleResources(cmd *cobra.Command, bundleName, version string, insta
 		}
 		return nil
 	}
+	clusterBindings, err := listClusterPolicyBindings(cmd.Context())
+	if err != nil {
+		return err
+	}
+	resources, shared := withoutSharedPolicies(resources, clusterBindings)
+	for _, policy := range slices.Sorted(maps.Keys(shared)) {
+		logging.Warnf("Keeping ValidatingAdmissionPolicy %s: still referenced by binding(s) outside bundle %s: %s", policy, bundleName, strings.Join(shared[policy], ", "))
+	}
 	if err := deleteKustomizeResources(resources, nil, dryRun); err != nil {
 		return err
 	}
@@ -1354,6 +1363,57 @@ func preflightBundleBindings(ctx context.Context, bundleName, version string, ov
 	}
 
 	return nil
+}
+
+func listClusterPolicyBindings(ctx context.Context) ([]admissionregistrationv1.ValidatingAdmissionPolicyBinding, error) {
+	clientset, err := kubernetes.NewClientset()
+	if err != nil {
+		return nil, err
+	}
+	bindingList, err := clientset.AdmissionregistrationV1().ValidatingAdmissionPolicyBindings().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+	return bindingList.Items, nil
+}
+
+// withoutSharedPolicies drops the bundle's ValidatingAdmissionPolicies that a
+// binding outside the bundle still references, and reports them as policy name
+// to binding names.
+//
+// Bundles ship policies under shared names (every pod-security-admission policy
+// is also in cenroq-best-practices), while bindings are prefixed per bundle.
+// Deleting a shared policy would leave the other bundle's bindings pointing at
+// nothing, which the API server treats as a no-op: enforcement silently stops.
+// The bundle's own bindings are always removed.
+func withoutSharedPolicies(resources []*unstructured.Unstructured, clusterBindings []admissionregistrationv1.ValidatingAdmissionPolicyBinding) ([]*unstructured.Unstructured, map[string][]string) {
+	ownBindings := make(map[string]struct{})
+	for _, resource := range resources {
+		if resource.GetKind() == "ValidatingAdmissionPolicyBinding" {
+			ownBindings[resource.GetName()] = struct{}{}
+		}
+	}
+
+	shared := make(map[string][]string)
+	for _, binding := range clusterBindings {
+		if _, own := ownBindings[binding.Name]; own {
+			continue
+		}
+		shared[binding.Spec.PolicyName] = append(shared[binding.Spec.PolicyName], binding.Name)
+	}
+
+	kept := make(map[string][]string)
+	filtered := make([]*unstructured.Unstructured, 0, len(resources))
+	for _, resource := range resources {
+		if resource.GetKind() == "ValidatingAdmissionPolicy" {
+			if users, ok := shared[resource.GetName()]; ok {
+				kept[resource.GetName()] = users
+				continue
+			}
+		}
+		filtered = append(filtered, resource)
+	}
+	return filtered, kept
 }
 
 func installedBundleVersionIndex(ctx context.Context) (map[string]map[string]struct{}, error) {
