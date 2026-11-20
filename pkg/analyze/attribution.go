@@ -52,7 +52,7 @@ var (
 	webhookPattern      = regexp.MustCompile(`admission webhook "([^"]+)" denied the request`)
 	vapPattern          = regexp.MustCompile(`ValidatingAdmissionPolicy '([^']+)'(?: with binding '([^']+)')? denied request`)
 	psaPattern          = regexp.MustCompile(`violates PodSecurity "([^"]+)"`)
-	quotaPattern        = regexp.MustCompile(`exceeded quota: ([^,]+)`)
+	quotaPattern        = regexp.MustCompile(`(?:exceeded|failed) quota: ([^,:]+)`)
 	limitRangerPattern  = regexp.MustCompile(`(?:minimum|maximum) [a-zA-Z ]+ per (?:Container|Pod)`)
 	limitRangerFallback = regexp.MustCompile(`\bLimitRanger\b`)
 )

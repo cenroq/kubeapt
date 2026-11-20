@@ -65,6 +65,12 @@ func TestAttribute(t *testing.T) {
 			wantName: "compute-quota",
 		},
 		{
+			name:     "resource quota requiring limits",
+			message:  `pods "probe" is forbidden: failed quota: compute-quota: must specify limits.cpu for: app; limits.memory for: app`,
+			wantType: analyze.EnforcerResourceQuota,
+			wantName: "compute-quota",
+		},
+		{
 			name:     "limit ranger",
 			message:  `pods "probe" is forbidden: minimum memory usage per Container is 100Mi, but request is 50Mi`,
 			wantType: analyze.EnforcerLimitRanger,

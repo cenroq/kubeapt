@@ -5,9 +5,19 @@ package analyze
 
 import (
 	"errors"
+	"regexp"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+)
+
+// Denials that are not admission control at all. Both arrive as 403
+// Forbidden, the same status a real policy rejection uses, so without these an
+// unattributed refusal from either would be recorded as a successful block.
+// They are only consulted when Attribute found no admission enforcer.
+var (
+	rbacEscalationPattern       = regexp.MustCompile(`is attempting to grant RBAC permissions not currently held|must have cluster-admin privileges to use the aggregationRule`)
+	namespaceTerminatingPattern = regexp.MustCompile(`because it is being terminated`)
 )
 
 // Outcome is what the API server did with a probe.
@@ -55,6 +65,10 @@ const (
 	ReasonQuota Reason = "quota"
 	// ReasonNamespaceMissing means the target namespace does not exist.
 	ReasonNamespaceMissing Reason = "namespace-missing"
+	// ReasonNamespaceTerminating means the namespace is being deleted. The
+	// NamespaceLifecycle plugin refuses every create there with a 403, which
+	// would otherwise read as a block of every namespaced probe.
+	ReasonNamespaceTerminating Reason = "namespace-terminating"
 	// ReasonKindNotServed means the cluster does not serve the probe's kind,
 	// usually a probe for an operator that is not installed.
 	ReasonKindNotServed Reason = "kind-not-served"
@@ -141,13 +155,26 @@ func Classify(p Probe, namespace string, submitted, returned *unstructured.Unstr
 		message := apiMessage(err)
 		enforcer := Attribute(message)
 		result.Enforcer = enforcer
-		if enforcer.Resource() {
+		switch {
+		case enforcer.Resource():
 			// Quota and LimitRanger are accounting, not admission control.
 			// Counting them as a block would be a false pass.
 			result.Outcome = OutcomeInconclusive
 			result.Reason = ReasonQuota
 			result.Detail = message
-		} else {
+		case enforcer.Type == EnforcerUnattributed && rbacEscalationPattern.MatchString(message):
+			// The create preflight passed, but RBAC escalation prevention
+			// refused a grant the caller does not hold itself (or an
+			// aggregationRule, which needs cluster-admin). That is
+			// authorization, not admission, so the probe was never evaluated.
+			result.Outcome = OutcomeInconclusive
+			result.Reason = ReasonRBAC
+			result.Detail = message
+		case enforcer.Type == EnforcerUnattributed && namespaceTerminatingPattern.MatchString(message):
+			result.Outcome = OutcomeInconclusive
+			result.Reason = ReasonNamespaceTerminating
+			result.Detail = message
+		default:
 			result.Outcome = OutcomeBlocked
 		}
 
