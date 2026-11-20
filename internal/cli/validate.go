@@ -424,7 +424,13 @@ func runValidate(cmd *cobra.Command, _ []string) error {
 		if err != nil {
 			return err
 		}
+		loaded := len(localRes)
 		localRes = filterResourcesByNamespaces(localRes, namespaces, allNamespaces)
+		if skipped := loaded - len(localRes); skipped > 0 {
+			// Without -n or -A only the active namespace is evaluated, so a
+			// manifest for another namespace would otherwise pass silently.
+			logging.Warnf("Skipped %d of %d resources in %s outside namespace(s) %s; use --namespaces or --all-namespaces to evaluate them", skipped, loaded, resourceFile, strings.Join(namespaces, ","))
+		}
 		logging.Debugf("Loaded %d resources from %s", len(localRes), resourceFile)
 		resources = append(resources, localRes...)
 		namespaceLabels = mergeFilteredNamespaceLabels(namespaceLabels, localNS, namespaces, allNamespaces)
@@ -941,21 +947,41 @@ func decodeResources(r io.Reader) ([]map[string]interface{}, error) {
 			return nil, err
 		}
 
-		if len(obj) == 0 {
-			continue
-		}
-
-		if apiVersion, _ := obj["apiVersion"].(string); apiVersion == "" {
-			continue
-		}
-		if kind, _ := obj["kind"].(string); kind == "" {
-			continue
-		}
-
-		resources = append(resources, obj)
+		resources = appendResource(resources, obj)
 	}
 
 	return resources, nil
+}
+
+// appendResource adds obj to resources, expanding list objects into their
+// items.
+//
+// kubectl apply accepts `kind: List` (and any *List kind with an items array)
+// and creates every item, so a manifest wrapped that way still deploys what it
+// contains. Evaluating the wrapper as one object of kind List would match no
+// policy and let every item through validate unchecked. Items follow the same
+// rules as top-level documents: no apiVersion or kind, no evaluation.
+func appendResource(resources []map[string]interface{}, obj map[string]interface{}) []map[string]interface{} {
+	if len(obj) == 0 {
+		return resources
+	}
+
+	apiVersion, _ := obj["apiVersion"].(string)
+	kind, _ := obj["kind"].(string)
+	if apiVersion == "" || kind == "" {
+		return resources
+	}
+
+	if items, ok := obj["items"].([]interface{}); ok && strings.HasSuffix(kind, "List") {
+		for _, item := range items {
+			if itemObj, ok := item.(map[string]interface{}); ok {
+				resources = appendResource(resources, itemObj)
+			}
+		}
+		return resources
+	}
+
+	return append(resources, obj)
 }
 
 func buildNamespaceLabelIndex(resources []map[string]interface{}) map[string]map[string]string {
